@@ -36,19 +36,22 @@ struct Params {
 
 inline void compress(thread uint* state, thread const uint* win) {
     uint w[64];
+    #pragma clang loop unroll(full)
     for (uint t = 0; t < 16; t++) w[t] = win[t];
+    #pragma clang loop unroll(full)
     for (uint t = 16; t < 64; t++) {
         uint s0 = rotr(w[t-15],7) ^ rotr(w[t-15],18) ^ (w[t-15] >> 3);
         uint s1 = rotr(w[t-2],17) ^ rotr(w[t-2],19) ^ (w[t-2] >> 10);
         w[t] = w[t-16] + s0 + w[t-7] + s1;
     }
     uint a=state[0],b=state[1],c=state[2],d=state[3],e=state[4],f=state[5],g=state[6],h=state[7];
+    #pragma clang loop unroll(full)
     for (uint t = 0; t < 64; t++) {
         uint S1 = rotr(e,6) ^ rotr(e,11) ^ rotr(e,25);
-        uint ch = (e & f) ^ ((~e) & g);
+        uint ch = g ^ (e & (f ^ g));               // (e & f) ^ (~e & g)
         uint t1 = h + S1 + ch + K[t] + w[t];
         uint S0 = rotr(a,2) ^ rotr(a,13) ^ rotr(a,22);
-        uint maj = (a & b) ^ (a & c) ^ (b & c);
+        uint maj = (a & b) ^ (c & (a ^ b));        // (a&b) ^ (a&c) ^ (b&c)
         uint t2 = S0 + maj;
         h=g; g=f; f=e; e=d+t1; d=c; c=b; b=a; a=t1+t2;
     }
@@ -57,34 +60,28 @@ inline void compress(thread uint* state, thread const uint* win) {
 }
 
 kernel void search(
-    constant uint*  midstate    [[buffer(0)]],
-    constant uchar* region      [[buffer(1)]],
-    constant Params& p          [[buffer(2)]],
-    device atomic_uint* found   [[buffer(3)]],
+    constant uint*  midstate      [[buffer(0)]],
+    constant uint*  region_words  [[buffer(1)]],
+    constant Params& p            [[buffer(2)]],
+    device atomic_uint* found     [[buffer(3)]],
     uint gid [[thread_position_in_grid]])
 {
     ulong nonce = p.base_nonce + (ulong)gid;
     uint state[8];
     for (uint i = 0; i < 8; i++) state[i] = midstate[i];
 
+    // Precomputed big-endian message words (nonce region zeroed); OR in the 8
+    // nonce bytes, then compress the 1-2 final blocks.
+    uint msg[32];
+    uint nwords = p.num_blocks * 16;
+    for (uint i = 0; i < nwords; i++) msg[i] = region_words[i];
+    for (uint k = 0; k < 8; k++) {
+        uint gb = p.nonce_off + k;
+        uint byte = (uint)((nonce >> (8 * (7 - k))) & 0xff);
+        msg[gb >> 2] |= byte << ((3u - (gb & 3u)) * 8u);
+    }
     for (uint b = 0; b < p.num_blocks; b++) {
-        uint win[16];
-        for (uint t = 0; t < 16; t++) {
-            uint word = 0;
-            for (uint j = 0; j < 4; j++) {
-                uint gb = b*64 + t*4 + j;
-                uint byte;
-                if (gb >= p.nonce_off && gb < p.nonce_off + 8) {
-                    uint k = gb - p.nonce_off;
-                    byte = (uint)((nonce >> (8 * (7 - k))) & 0xff);
-                } else {
-                    byte = region[gb];
-                }
-                word = (word << 8) | byte;
-            }
-            win[t] = word;
-        }
-        compress(state, win);
+        compress(state, &msg[b * 16]);
     }
 
     // big-endian digest <= target ?
@@ -130,6 +127,10 @@ pub fn search_metal(
 ) -> Option<(u64, [u8; 32])> {
     let ms = sha256::midstate_for_prefix(prefix);
     let (region, num_blocks, nonce_off) = region_for(&ms);
+    let region_words: Vec<u32> = region
+        .chunks_exact(4)
+        .map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
 
     let mut tgt = [0u32; 8];
     for i in 0..8 {
@@ -152,8 +153,11 @@ pub fn search_metal(
 
     let opt = MTLResourceOptions::StorageModeShared;
     let ms_buf = device.new_buffer_with_data(ms.state.as_ptr() as *const _, 32, opt);
-    let region_buf =
-        device.new_buffer_with_data(region.as_ptr() as *const _, region.len() as u64, opt);
+    let region_buf = device.new_buffer_with_data(
+        region_words.as_ptr() as *const _,
+        (region_words.len() * 4) as u64,
+        opt,
+    );
     let found_buf = device.new_buffer(4, opt);
 
     let tg = pipeline.max_total_threads_per_threadgroup().min(256);
