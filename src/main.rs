@@ -9,6 +9,11 @@
 //! (and later CUDA) backends must reproduce it bit-for-bit; the CPU path stays
 //! as the oracle the GPU kernels are tested against.
 
+mod sha256;
+
+#[cfg(target_os = "macos")]
+mod metal_backend;
+
 use clap::Parser;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -42,6 +47,10 @@ struct Args {
     /// Number of nonces to search: `[start_nonce, start_nonce + count)`.
     #[arg(long)]
     count: u64,
+
+    /// Search backend: `metal` (GPU, default) or `cpu` (the reference search).
+    #[arg(long, default_value = "metal")]
+    backend: String,
 }
 
 /// Mirror of the worker `WorkerResult` JSON contract.
@@ -72,7 +81,7 @@ fn parse_target(s: &str) -> Option<[u8; 32]> {
 
 /// `digest <= target` as unsigned 256-bit big-endian integers.
 #[inline]
-fn meets_target(digest: &[u8; 32], target: &[u8; 32]) -> bool {
+pub(crate) fn meets_target(digest: &[u8; 32], target: &[u8; 32]) -> bool {
     for i in 0..32 {
         if digest[i] != target[i] {
             return digest[i] < target[i];
@@ -126,7 +135,26 @@ fn main() {
         std::process::exit(2);
     });
 
-    let result = match search_cpu(&prefix, &target, args.start_nonce, args.count) {
+    let found = match args.backend.as_str() {
+        "cpu" => search_cpu(&prefix, &target, args.start_nonce, args.count),
+        "metal" => {
+            #[cfg(target_os = "macos")]
+            {
+                metal_backend::search_metal(&prefix, &target, args.start_nonce, args.count)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                eprintln!("error: metal backend requires macOS");
+                std::process::exit(2);
+            }
+        }
+        other => {
+            eprintln!("error: unknown backend '{other}' (use metal|cpu)");
+            std::process::exit(2);
+        }
+    };
+
+    let result = match found {
         Some((nonce, digest)) => WorkerResult {
             work_id: args.work_id,
             status: "found",

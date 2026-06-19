@@ -17,12 +17,19 @@ protocol — no Lattice/block-parsing code. See
 
 Built in phases, each gated on reproducing the previous one bit-for-bit:
 
-- [x] **Phase 1 — CPU golden reference** (this Rust binary). The oracle every
+- [x] **Phase 1 — CPU golden reference** (`--backend cpu`). The oracle every
       GPU kernel is tested against.
-- [ ] **Phase 2 — Metal kernel** (Apple Silicon, `objc2-metal` + MSL).
-- [ ] **Phase 3 — kernel optimization** (midstate, schedule precompute,
-      high-word early-exit, full unroll, constant-memory K).
-- [ ] **Phase 4 — CUDA** (`cudarc` + PTX), for NVIDIA.
+- [x] **Phase 2 — Metal kernel** (`--backend metal`, Apple Silicon). Resumes
+      SHA-256 from a host-computed prefix midstate over the final block(s).
+      Verified bit-for-bit against the CPU oracle. **~230 MH/s** un-optimized on
+      M-series (vs ~10 MH/s single CPU thread).
+- [ ] **Phase 3 — kernel optimization** (precomputed message words, high-word
+      early-exit, full unroll, constant-memory K) — headroom to ~1 GH/s.
+- [ ] **Phase 4 — CUDA** (`cudarc` + PTX), for NVIDIA (needs NVIDIA hardware).
+
+Currently on the `metal` crate; objc2-metal is the eventual migration. **Metal
+runs on the host** (Apple GPU is not visible inside Linux containers), so the
+coordinator + this worker run natively on macOS against a node's RPC.
 
 The architecture is a thin Rust host calling per-vendor native kernels (not a
 single portable shader): SHA-256's hot path is rotates and 3-input booleans,
