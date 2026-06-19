@@ -1,0 +1,22 @@
+[package]
+name = "lattice-miner-gpu"
+version = "0.1.0"
+edition = "2021"
+description = "GPU proof-of-work miner for the Lattice network (Mining Worker Protocol)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/adalinxx/lattice-miner-gpu"
+
+[[bin]]
+name = "lattice-miner-gpu"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+
+[profile.release]
+lto = true
+codegen-units = 1
