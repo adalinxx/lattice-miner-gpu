@@ -30,23 +30,32 @@ __constant__ unsigned int K[64] = {
 __device__ __forceinline__ unsigned int rotr(unsigned int x, unsigned int n) {
     return (x >> n) | (x << (32u - n));
 }
+__device__ __forceinline__ unsigned int ssig0(unsigned int x){ return rotr(x,7) ^ rotr(x,18) ^ (x >> 3); }
+__device__ __forceinline__ unsigned int ssig1(unsigned int x){ return rotr(x,17) ^ rotr(x,19) ^ (x >> 10); }
 
+// Optimized compression: a 16-word SLIDING message schedule (w[16] instead of
+// w[64]) so the schedule stays in registers — the w[64] version spilled to local
+// (DRAM) memory, the dominant cost. The round loop is fully unrolled so the
+// `&15` indices are compile-time constants. Bit-for-bit identical output to the
+// reference (host re-verifies every hit).
 __device__ void compress(unsigned int *state, const unsigned int *win) {
-    unsigned int w[64];
+    unsigned int w[16];
     #pragma unroll
-    for (unsigned int t = 0; t < 16; t++) w[t] = win[t];
-    #pragma unroll
-    for (unsigned int t = 16; t < 64; t++) {
-        unsigned int s0 = rotr(w[t-15],7) ^ rotr(w[t-15],18) ^ (w[t-15] >> 3);
-        unsigned int s1 = rotr(w[t-2],17) ^ rotr(w[t-2],19) ^ (w[t-2] >> 10);
-        w[t] = w[t-16] + s0 + w[t-7] + s1;
-    }
+    for (int i = 0; i < 16; i++) w[i] = win[i];
     unsigned int a=state[0],b=state[1],c=state[2],d=state[3],e=state[4],f=state[5],g=state[6],h=state[7];
     #pragma unroll
-    for (unsigned int t = 0; t < 64; t++) {
+    for (int t = 0; t < 64; t++) {
+        unsigned int wt;
+        if (t < 16) {
+            wt = w[t];
+        } else {
+            // w[t] = w[t-16] + ssig0(w[t-15]) + w[t-7] + ssig1(w[t-2]), mod-16 indexed.
+            wt = w[t & 15] + ssig0(w[(t + 1) & 15]) + w[(t + 9) & 15] + ssig1(w[(t + 14) & 15]);
+            w[t & 15] = wt;
+        }
         unsigned int S1 = rotr(e,6) ^ rotr(e,11) ^ rotr(e,25);
         unsigned int ch = g ^ (e & (f ^ g));
-        unsigned int t1 = h + S1 + ch + K[t] + w[t];
+        unsigned int t1 = h + S1 + ch + K[t] + wt;
         unsigned int S0 = rotr(a,2) ^ rotr(a,13) ^ rotr(a,22);
         unsigned int maj = (a & b) ^ (c & (a ^ b));
         unsigned int t2 = S0 + maj;
