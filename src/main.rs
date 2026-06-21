@@ -14,6 +14,12 @@ mod sha256;
 #[cfg(target_os = "macos")]
 mod metal_backend;
 
+#[cfg(feature = "cuda")]
+mod cuda_backend;
+
+#[cfg(feature = "opencl")]
+mod opencl_backend;
+
 use clap::Parser;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -48,7 +54,9 @@ struct Args {
     #[arg(long)]
     count: u64,
 
-    /// Search backend: `metal` (GPU, default) or `cpu` (the reference search).
+    /// Search backend: `metal` (Apple GPU, default), `cuda` (NVIDIA),
+    /// `opencl` (AMD/NVIDIA/Intel), or `cpu` (the reference search). cuda/opencl
+    /// require the matching build feature.
     #[arg(long, default_value = "metal")]
     backend: String,
 }
@@ -148,8 +156,30 @@ fn main() {
                 std::process::exit(2);
             }
         }
+        "cuda" => {
+            #[cfg(feature = "cuda")]
+            {
+                cuda_backend::search_cuda(&prefix, &target, args.start_nonce, args.count)
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                eprintln!("error: cuda backend not compiled in (rebuild with --features cuda)");
+                std::process::exit(2);
+            }
+        }
+        "opencl" => {
+            #[cfg(feature = "opencl")]
+            {
+                opencl_backend::search_opencl(&prefix, &target, args.start_nonce, args.count)
+            }
+            #[cfg(not(feature = "opencl"))]
+            {
+                eprintln!("error: opencl backend not compiled in (rebuild with --features opencl)");
+                std::process::exit(2);
+            }
+        }
         other => {
-            eprintln!("error: unknown backend '{other}' (use metal|cpu)");
+            eprintln!("error: unknown backend '{other}' (use metal|cuda|opencl|cpu)");
             std::process::exit(2);
         }
     };

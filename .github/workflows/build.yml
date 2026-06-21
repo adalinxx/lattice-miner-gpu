@@ -1,0 +1,33 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Default build (Metal + CPU) and the golden-reference tests. Metal needs macOS;
+  # the SHA-256 vector + meets_target tests are the oracle the GPU kernels mirror.
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - run: cargo test --release
+
+  # Compile-verify the non-Apple GPU backends on Linux (the deployment target for
+  # cloud rental). cudarc uses runtime loading (libcuda dlopen'd at run time), so
+  # the host builds without the CUDA toolkit; OpenCL links libOpenCL via ocl-icd.
+  # Runtime correctness is enforced at run time by the host re-verification of
+  # every hit against the CPU oracle (see each backend's `assert!`).
+  linux-gpu-features:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install OpenCL loader (for --features opencl link)
+        run: sudo apt-get update && sudo apt-get install -y ocl-icd-opencl-dev
+      - run: cargo build --release --features opencl
+      - run: cargo build --release --features cuda
+      - run: cargo test --release   # CPU oracle tests are platform-independent

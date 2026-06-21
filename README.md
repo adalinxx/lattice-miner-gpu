@@ -27,28 +27,47 @@ Built in phases, each gated on reproducing the previous one bit-for-bit:
       host-precomputed message words. **~834 MH/s** (3.6× the first kernel).
       Remaining headroom (message-schedule precompute, high-word early-exit)
       toward ~1 GH/s.
-- [ ] **Phase 4 — CUDA** (`cudarc` + PTX), for NVIDIA (needs NVIDIA hardware).
+- [x] **Phase 4 — CUDA** (`--backend cuda`, NVIDIA). `cudarc` + NVRTC compiles
+      the kernel at runtime; `libcuda` is loaded dynamically, so the host binary
+      builds without the CUDA toolkit and runs on any NVIDIA driver (incl. cloud
+      rental: vast.ai / RunPod / Lambda). Same midstate-resume kernel as Metal.
+- [x] **Phase 5 — OpenCL** (`--backend opencl`, AMD / NVIDIA / Intel). One
+      backend for every non-Apple GPU via the platform OpenCL ICD.
 
-Currently on the `metal` crate; objc2-metal is the eventual migration. **Metal
-runs on the host** (Apple GPU is not visible inside Linux containers), so the
-coordinator + this worker run natively on macOS against a node's RPC.
+Every backend reproduces the CPU oracle bit-for-bit, and the host
+**re-verifies every hit** against `sha256::finalize_from_midstate` before
+reporting it — a kernel bug surfaces as a hard `assert!`, never an invalid share.
 
-The architecture is a thin Rust host calling per-vendor native kernels (not a
-single portable shader): SHA-256's hot path is rotates and 3-input booleans,
-which native ISAs do in one instruction and portable shader languages don't.
+Backends are a thin Rust host calling per-vendor native kernels (not one portable
+shader): SHA-256's hot path is rotates and 3-input booleans, which native ISAs do
+in one instruction. **Metal runs only on macOS** (Apple GPU isn't visible inside
+Linux containers); **CUDA/OpenCL** are how the network is mined on commodity and
+cloud GPUs — essential for hashpower beyond Apple Silicon.
 
 ## Build & run
 
 ```bash
-cargo build --release
+cargo build --release           # macOS: Metal + CPU
 ./target/release/lattice-miner-gpu \
   --work-id w1 --prefix-hex deadbeef \
   --target ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
-  --start-nonce 0 --count 1000000
+  --start-nonce 0 --count 1000000 --backend metal
+```
+
+Non-Apple GPUs (opt-in features; the default build pulls no GPU toolkit):
+
+```bash
+# NVIDIA — builds without the CUDA toolkit (libcuda loaded at runtime).
+cargo build --release --features cuda
+lattice-miner-gpu ... --backend cuda
+
+# AMD / NVIDIA / Intel — needs an OpenCL loader at build (Linux: ocl-icd-opencl-dev).
+cargo build --release --features opencl
+lattice-miner-gpu ... --backend opencl
 ```
 
 ```bash
-cargo test   # includes reference PoW vectors
+cargo test   # reference PoW vectors + midstate/target oracle (all platforms)
 ```
 
 ## Use with a node
