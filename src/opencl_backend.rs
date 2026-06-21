@@ -34,20 +34,27 @@ __constant uint K[64] = {
 };
 
 inline uint rotr(uint x, uint n) { return rotate(x, 32u - n); }
+inline uint ssig0(uint x){ return rotr(x,7) ^ rotr(x,18) ^ (x >> 3); }
+inline uint ssig1(uint x){ return rotr(x,17) ^ rotr(x,19) ^ (x >> 10); }
 
+// 16-word SLIDING message schedule (w[16] not w[64]) so it stays in registers
+// instead of spilling to private/local memory. Bit-for-bit identical output to
+// the reference; the host re-verifies every hit.
 inline void compress(uint *state, const uint *win) {
-    uint w[64];
-    for (uint t = 0; t < 16; t++) w[t] = win[t];
-    for (uint t = 16; t < 64; t++) {
-        uint s0 = rotr(w[t-15],7) ^ rotr(w[t-15],18) ^ (w[t-15] >> 3);
-        uint s1 = rotr(w[t-2],17) ^ rotr(w[t-2],19) ^ (w[t-2] >> 10);
-        w[t] = w[t-16] + s0 + w[t-7] + s1;
-    }
+    uint w[16];
+    for (int i = 0; i < 16; i++) w[i] = win[i];
     uint a=state[0],b=state[1],c=state[2],d=state[3],e=state[4],f=state[5],g=state[6],h=state[7];
-    for (uint t = 0; t < 64; t++) {
+    for (int t = 0; t < 64; t++) {
+        uint wt;
+        if (t < 16) {
+            wt = w[t];
+        } else {
+            wt = w[t & 15] + ssig0(w[(t + 1) & 15]) + w[(t + 9) & 15] + ssig1(w[(t + 14) & 15]);
+            w[t & 15] = wt;
+        }
         uint S1 = rotr(e,6) ^ rotr(e,11) ^ rotr(e,25);
         uint ch = g ^ (e & (f ^ g));
-        uint t1 = h + S1 + ch + K[t] + w[t];
+        uint t1 = h + S1 + ch + K[t] + wt;
         uint S0 = rotr(a,2) ^ rotr(a,13) ^ rotr(a,22);
         uint maj = (a & b) ^ (c & (a ^ b));
         uint t2 = S0 + maj;
