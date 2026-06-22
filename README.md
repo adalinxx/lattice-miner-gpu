@@ -33,6 +33,9 @@ Built in phases, each gated on reproducing the previous one bit-for-bit:
       rental: vast.ai / RunPod / Lambda). Same midstate-resume kernel as Metal.
 - [x] **Phase 5 — OpenCL** (`--backend opencl`, AMD / NVIDIA / Intel). One
       backend for every non-Apple GPU via the platform OpenCL ICD.
+- [x] **Phase 6 — auto-detect** (`--backend auto`, the default). Probes the
+      compiled-in backends and runs the best live device (CUDA > Metal > OpenCL
+      > CPU), so the coordinator's worker self-selects on any host.
 
 Every backend reproduces the CPU oracle bit-for-bit, and the host
 **re-verifies every hit** against `sha256::finalize_from_midstate` before
@@ -47,23 +50,23 @@ cloud GPUs — essential for hashpower beyond Apple Silicon.
 ## Build & run
 
 ```bash
-cargo build --release           # macOS: Metal + CPU
+cargo build --release           # CPU + (on macOS) Metal
 ./target/release/lattice-miner-gpu \
   --work-id w1 --prefix-hex deadbeef \
   --target ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
-  --start-nonce 0 --count 1000000 --backend metal
+  --start-nonce 0 --count 1000000
+# --backend defaults to `auto`: picks CUDA > Metal > OpenCL > CPU.
 ```
 
-Non-Apple GPUs (opt-in features; the default build pulls no GPU toolkit):
+Non-Apple GPUs are opt-in build features (the default build pulls no GPU toolkit).
+Once built, `auto` selects them — no `--backend` flag needed:
 
 ```bash
 # NVIDIA — builds without the CUDA toolkit (libcuda loaded at runtime).
 cargo build --release --features cuda
-lattice-miner-gpu ... --backend cuda
 
 # AMD / NVIDIA / Intel — needs an OpenCL loader at build (Linux: ocl-icd-opencl-dev).
 cargo build --release --features opencl
-lattice-miner-gpu ... --backend opencl
 ```
 
 ```bash
@@ -72,7 +75,8 @@ cargo test   # reference PoW vectors + midstate/target oracle (all platforms)
 
 ## Use with a node
 
-Point the coordinator at this binary:
+Point the coordinator at this binary — it auto-detects the GPU
+(CUDA/Metal/OpenCL), so no `--backend` is needed:
 
 ```bash
 lattice-mining-coordinator \
