@@ -10,12 +10,28 @@ repository = "https://github.com/adalinxx/lattice-miner-gpu"
 name = "lattice-miner-gpu"
 path = "src/main.rs"
 
+[features]
+# Off by default so the stock build (macOS/Metal + CPU) needs no GPU toolkits.
+# Enable per non-Apple target: `--features cuda` (NVIDIA) / `--features opencl`
+# (AMD, NVIDIA, Intel). See README for build prerequisites.
+cuda = ["dep:cudarc"]
+opencl = ["dep:opencl3"]
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hex = "0.4"
+
+# CUDA backend (NVIDIA). dynamic-loading resolves libcuda at runtime, so the host
+# binary builds without the CUDA toolkit; nvrtc compiles the kernel at runtime.
+# `cuda-12060` selects bundled bindings (no toolkit needed at build; libcuda is
+# loaded at runtime). Builders targeting an older NVIDIA driver can swap this for
+# a lower `cuda-XXXXX` feature (see cudarc docs).
+cudarc = { version = "0.12", optional = true, features = ["driver", "nvrtc", "cuda-12060"] }
+# OpenCL backend (AMD / NVIDIA / Intel). Links libOpenCL (ocl-icd on Linux).
+opencl3 = { version = "0.9", optional = true }
 
 # Metal backend (Apple Silicon). The `metal` crate is in maintenance but
 # functional; objc2-metal is the eventual migration target (see README).
