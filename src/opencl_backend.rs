@@ -119,6 +119,13 @@ fn region_words_for(ms: &Midstate) -> (Vec<u32>, u32, u32) {
 /// OpenCL search over `[start, start+count)`. Returns the first winning
 /// `(nonce, digest)` or `None`. Errors (no device / build failure) surface as a
 /// printed message and `None`, so the coordinator simply re-assigns the range.
+/// True if at least one OpenCL GPU device is present (for `--backend auto`).
+pub fn is_available() -> bool {
+    get_all_devices(CL_DEVICE_TYPE_GPU)
+        .map(|d| !d.is_empty())
+        .unwrap_or(false)
+}
+
 pub fn search_opencl(
     prefix: &[u8],
     target: &[u8; 32],

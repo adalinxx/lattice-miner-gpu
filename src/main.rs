@@ -54,10 +54,10 @@ struct Args {
     #[arg(long)]
     count: u64,
 
-    /// Search backend: `metal` (Apple GPU, default), `cuda` (NVIDIA),
-    /// `opencl` (AMD/NVIDIA/Intel), or `cpu` (the reference search). cuda/opencl
-    /// require the matching build feature.
-    #[arg(long, default_value = "metal")]
+    /// Search backend: `auto` (default — detect the best available GPU), or force
+    /// `metal` (Apple), `cuda` (NVIDIA), `opencl` (AMD/NVIDIA/Intel), or `cpu`
+    /// (reference). cuda/opencl require the matching build feature.
+    #[arg(long, default_value = "auto")]
     backend: String,
 }
 
@@ -125,6 +125,31 @@ fn search_cpu(prefix: &[u8], target: &[u8; 32], start: u64, count: u64) -> Optio
     None
 }
 
+/// Pick the best available compiled-in GPU backend, falling back to CPU.
+/// Preference: cuda (native NVIDIA) > metal (Apple) > opencl (generic) > cpu.
+/// Each `is_available()` is a cheap device probe.
+fn detect_backend() -> String {
+    #[cfg(feature = "cuda")]
+    {
+        if cuda_backend::is_available() {
+            return "cuda".to_string();
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if metal_backend::is_available() {
+            return "metal".to_string();
+        }
+    }
+    #[cfg(feature = "opencl")]
+    {
+        if opencl_backend::is_available() {
+            return "opencl".to_string();
+        }
+    }
+    "cpu".to_string()
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -143,7 +168,16 @@ fn main() {
         std::process::exit(2);
     });
 
-    let found = match args.backend.as_str() {
+    // Resolve `auto` to the best available compiled-in backend, logged to stderr.
+    let backend = if args.backend == "auto" {
+        let b = detect_backend();
+        eprintln!("auto-detected backend: {b}");
+        b
+    } else {
+        args.backend.clone()
+    };
+
+    let found = match backend.as_str() {
         "cpu" => search_cpu(&prefix, &target, args.start_nonce, args.count),
         "metal" => {
             #[cfg(target_os = "macos")]
@@ -179,7 +213,7 @@ fn main() {
             }
         }
         other => {
-            eprintln!("error: unknown backend '{other}' (use metal|cuda|opencl|cpu)");
+            eprintln!("error: unknown backend '{other}' (use auto|metal|cuda|opencl|cpu)");
             std::process::exit(2);
         }
     };

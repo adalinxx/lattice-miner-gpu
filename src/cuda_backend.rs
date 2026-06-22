@@ -119,6 +119,11 @@ fn region_words_for(ms: &Midstate) -> (Vec<u32>, u32, u32) {
     (words, num_blocks, nonce_off)
 }
 
+/// True if an NVIDIA CUDA device is usable (libcuda loads + device 0 exists).
+pub fn is_available() -> bool {
+    CudaDevice::new(0).is_ok()
+}
+
 pub fn search_cuda(
     prefix: &[u8],
     target: &[u8; 32],
