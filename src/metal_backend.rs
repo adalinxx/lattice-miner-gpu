@@ -10,6 +10,11 @@ use metal::{
 };
 use std::mem::size_of;
 
+/// True if a Metal GPU device is present (for `--backend auto`).
+pub fn is_available() -> bool {
+    Device::system_default().is_some()
+}
+
 const KERNEL_SRC: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
