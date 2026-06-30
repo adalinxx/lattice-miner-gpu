@@ -79,3 +79,19 @@ lattice-mining-coordinator \
   --node http://127.0.0.1:8080/api --rpc-cookie-file ~/.lattice/.cookie \
   --worker-executable ./target/release/lattice-miner-gpu --workers 1
 ```
+
+## Docker (cloud GPU rental)
+
+A self-contained CUDA image (`ghcr.io/adalinxx/lattice-miner-gpu:main`, built by CI)
+bundles a Lattice node + the mining coordinator + this worker. The node syncs the
+backbone via DNS seeds and the coordinator drives the GPU — no peer or wiring to
+configure:
+
+```bash
+docker run --gpus all -v lattice-data:/data ghcr.io/adalinxx/lattice-miner-gpu:main
+```
+
+`libcuda` is provided by the host driver through the NVIDIA container runtime
+(`--gpus all`). Tunables via `-e`: `MINER_WORKERS`, `MINER_BACKEND` (cuda|opencl|cpu),
+`EXTRA_NODE_ARGS` (e.g. `--coinbase-address <addr>`), `EXTRA_MINER_ARGS`. See
+`deploy/gpu-entrypoint.sh`.
