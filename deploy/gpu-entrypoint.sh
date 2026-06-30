@@ -42,12 +42,13 @@ done
 echo "[gpu-miner] node up — starting coordinator (${MINER_BACKEND:-cuda}, ${MINER_WORKERS:-1} worker(s))"
 # The coordinator polls templates until the node is synced/mineable, so it tolerates
 # a still-catching-up node; it credits the node's coinbase identity (a fresh,
-# non-premine key unless EXTRA_NODE_ARGS sets --coinbase-address).
+# non-premine key unless EXTRA_NODE_ARGS sets --coinbase-address). The coordinator
+# has no --backend flag and never passes one to the worker, so the GPU backend is
+# forced by the cuda-worker shim (which reads MINER_BACKEND from the inherited env).
 # shellcheck disable=SC2086
 exec lattice-mining-coordinator \
   --node "$NODE_API" \
   --rpc-cookie-file "${DATA_DIR}/.cookie" \
-  --worker-executable /usr/local/bin/lattice-miner-gpu \
-  --backend "${MINER_BACKEND:-cuda}" \
+  --worker-executable /usr/local/bin/lattice-cuda-worker \
   --workers "${MINER_WORKERS:-1}" \
   ${EXTRA_MINER_ARGS:-}

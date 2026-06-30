@@ -40,8 +40,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=node /usr/local/bin/lattice-node            /usr/local/bin/lattice-node
 COPY --from=node /usr/local/bin/lattice-mining-coordinator /usr/local/bin/lattice-mining-coordinator
 COPY --from=worker /src/target/release/lattice-miner-gpu /usr/local/bin/lattice-miner-gpu
+# Backend shim: the coordinator can't pass --backend to the worker, so force it here.
+COPY deploy/cuda-worker.sh /usr/local/bin/lattice-cuda-worker
 COPY deploy/gpu-entrypoint.sh /usr/local/bin/gpu-entrypoint
-RUN chmod +x /usr/local/bin/gpu-entrypoint
+RUN chmod +x /usr/local/bin/lattice-cuda-worker /usr/local/bin/gpu-entrypoint
 
 VOLUME /data
 ENTRYPOINT ["/usr/local/bin/gpu-entrypoint"]
