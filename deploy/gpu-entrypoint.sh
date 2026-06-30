@@ -4,10 +4,15 @@
 # The CUDA worker (lattice-miner-gpu) does PoW only; it cannot reach the network on
 # its own. So this image bundles a Lattice node and the mining coordinator:
 #
-#   1. lattice-node syncs the chain from the backbone (DNS-seed discovery — no peer
-#      to configure), exposing RPC on localhost.
+#   1. lattice-node joins via bootstrap seeds, then syncs the chain source-agnostically
+#      (any peer, PoW + content-addressed), exposing RPC on localhost.
 #   2. lattice-mining-coordinator pulls templates from that local node and drives the
 #      CUDA worker for the actual proof-of-work, then gossips sealed blocks back.
+#
+# Bootstrap seeds are built into the node binary (BootstrapPeers), and the default
+# --min-peer-key-bits (16) already matches the live network, so a bare node joins and
+# syncs source-agnostically on its own — no --peer or key-bits flag to configure.
+# (Verified: a fresh bare node reaches the mainnet's mineable tip in ~2 min.)
 #
 # libcuda is injected from the host driver by the NVIDIA container runtime (vast.ai /
 # RunPod / Lambda --gpus all); NVRTC compiles the kernel at run time.
@@ -17,8 +22,8 @@
 #   RPC_PORT          local node RPC port                   (default 8080)
 #   MINER_WORKERS     concurrent worker invocations         (default 1)
 #   MINER_BACKEND     cuda | opencl | cpu                   (default cuda)
-#   EXTRA_NODE_ARGS   extra lattice-node flags (e.g. --coinbase-address <addr>,
-#                     --external-address <ip:port>)
+#   EXTRA_NODE_ARGS   extra lattice-node flags (e.g. --coinbase-address <addr>, or
+#                     --min-peer-key-bits N to join a network running a different value)
 #   EXTRA_MINER_ARGS  extra coordinator flags (e.g. --child-node <url>)
 set -euo pipefail
 
@@ -27,7 +32,7 @@ RPC_PORT="${RPC_PORT:-8080}"
 NODE_API="http://127.0.0.1:${RPC_PORT}/api"
 mkdir -p "$DATA_DIR"
 
-echo "[gpu-miner] starting node (DNS-seed discovery → backbone)…"
+echo "[gpu-miner] starting node (built-in seeds, default key-bits → source-agnostic sync)…"
 # shellcheck disable=SC2086
 lattice-node --autosize --data-dir "$DATA_DIR" --rpc-port "$RPC_PORT" ${EXTRA_NODE_ARGS:-} &
 NODE_PID=$!
