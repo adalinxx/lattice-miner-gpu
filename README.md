@@ -95,3 +95,10 @@ docker run --gpus all -v lattice-data:/data ghcr.io/adalinxx/lattice-miner-gpu:m
 (`--gpus all`). Tunables via `-e`: `MINER_WORKERS`, `MINER_BACKEND` (cuda|opencl|cpu),
 `EXTRA_NODE_ARGS` (e.g. `--coinbase-address <addr>`), `EXTRA_MINER_ARGS`. See
 `deploy/gpu-entrypoint.sh`.
+
+**Merged (multi-chain) mining.** Set `-e CHILD_CHAINS="toy"` to also deploy and
+merge-mine a child chain of Nexus on this box — one PoW search advances both (easiest
+target wins; sealed blocks anchor the child). This is **single-box only**: each deploy
+builds a fresh genesis, so it's for one box mining its own child, not many boxes sharing
+one child. Child deploy params are overridable (`CHILD_TARGET_BLOCK_TIME`,
+`CHILD_INITIAL_REWARD`, …); see `deploy/gpu-entrypoint.sh`.
