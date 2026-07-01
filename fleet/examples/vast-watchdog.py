@@ -52,11 +52,15 @@ DISK = os.environ.get("FLEET_DISK", "32")
 # CUDA 12.6 kernels; a modest inet floor avoids a box that takes forever to pull the
 # image. rent_replacement() sorts by price and picks the cheapest. Narrow it (e.g. a
 # specific gpu_name, more VRAM) via the FLEET_QUERY env var if you ever want to.
-QUERY = os.environ.get(
-    "FLEET_QUERY",
+_DEFAULT_QUERY = (
     "rentable=true verified=true num_gpus=1 cuda_vers>=12.6 "
-    f"disk_space>={DISK} reliability>0.98 inet_down>=100",
+    f"disk_space>={DISK} reliability>0.98 inet_down>=100"
 )
+# `or`, not a get() default: GitHub Actions exports `FLEET_QUERY: ${{ vars.X }}` as an
+# empty string when the repo var is unset, so os.environ.get("FLEET_QUERY", default)
+# would return "" (the key exists) — silently dropping every safety constraint and
+# letting the watchdog rent unverified / low-CUDA boxes. Treat empty as unset.
+QUERY = os.environ.get("FLEET_QUERY") or _DEFAULT_QUERY
 MAX_DPH = float(os.environ.get("FLEET_MAX_DPH", "0.10"))
 HEARTBEAT_URL = os.environ.get("FLEET_HEARTBEAT_URL", "").strip()
 
@@ -109,7 +113,9 @@ def rent_replacement(exclude=()):
         return None
     try:
         offers = [o for o in json.loads(out)
-                  if o.get("dph_total", 1e9) <= MAX_DPH and o.get("id") not in exclude]
+                  if o.get("id") is not None
+                  and o.get("dph_total", 1e9) <= MAX_DPH
+                  and o["id"] not in exclude]
     except json.JSONDecodeError:
         print("  ! could not parse offers JSON")
         return None
