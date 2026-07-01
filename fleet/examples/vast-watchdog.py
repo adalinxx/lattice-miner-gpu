@@ -109,7 +109,7 @@ def rent_replacement(exclude=()):
         return None
     try:
         offers = [o for o in json.loads(out)
-                  if o.get("dph_total", 1e9) <= MAX_DPH and o["id"] not in exclude]
+                  if o.get("dph_total", 1e9) <= MAX_DPH and o.get("id") not in exclude]
     except json.JSONDecodeError:
         print("  ! could not parse offers JSON")
         return None
