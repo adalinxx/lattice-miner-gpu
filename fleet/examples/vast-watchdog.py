@@ -61,7 +61,15 @@ MAX_DPH = float(os.environ.get("FLEET_MAX_DPH", "0.10"))
 HEARTBEAT_URL = os.environ.get("FLEET_HEARTBEAT_URL", "").strip()
 
 RUNNING = {"running"}
-BOOTING = {"loading", "created", "scheduling"}  # counts toward desired; don't destroy
+# Destruction is an ALLOWLIST, not a denylist: only tear down instances in a KNOWN
+# terminal state. Everything else — running, still-booting, or a status string we don't
+# recognize — is left alone and counts toward capacity. This is deliberate: classifying
+# "anything not explicitly healthy" as dead would destroy a healthy/booting box (or one
+# reporting a transient/unknown status like a Docker restart or an empty status right
+# after create) and rent a paid replacement — the exact runaway spend this guards against.
+# A genuinely-missing box surfaces as a heartbeat gap, not as churn. Extend TERMINAL only
+# with statuses confirmed terminal against `vastai show instances --raw`.
+TERMINAL = {"exited", "offline", "inactive", "error"}
 
 
 def vast(args):
@@ -92,18 +100,22 @@ def status_of(inst):
     return (inst.get("actual_status") or inst.get("cur_state") or "unknown").lower()
 
 
-def rent_replacement():
+def rent_replacement(exclude=()):
+    """Rent the cheapest matching offer not in `exclude`. Returns the offer id on
+    success, else None. `exclude` lets a multi-rent cycle skip offers it already took,
+    so renting need>1 doesn't retarget the same single cheapest offer every time."""
     out, ok = vast(["search", "offers", QUERY, "-o", "dph+", "--raw"])
     if not ok:
-        return False
+        return None
     try:
-        offers = [o for o in json.loads(out) if o.get("dph_total", 1e9) <= MAX_DPH]
+        offers = [o for o in json.loads(out)
+                  if o.get("dph_total", 1e9) <= MAX_DPH and o["id"] not in exclude]
     except json.JSONDecodeError:
         print("  ! could not parse offers JSON")
-        return False
+        return None
     if not offers:
         print(f"  no offer matching query under ${MAX_DPH:.4f}/hr")
-        return False
+        return None
     o = offers[0]
     print(f"  renting offer {o['id']} ({o.get('gpu_name')}) @ ${o['dph_total']:.4f}/hr {o.get('geolocation','')}")
     out, ok = vast([
@@ -113,7 +125,7 @@ def rent_replacement():
     ])
     success = ok and '"success":true' in out.replace(" ", "")
     print("  -> rented" if success else f"  -> rent failed: {out.strip()[:200]}")
-    return success
+    return o["id"] if success else None
 
 
 def ping_heartbeat():
@@ -135,27 +147,41 @@ def main():
         return 0
 
     running = [i for i in inst if status_of(i) in RUNNING]
-    booting = [i for i in inst if status_of(i) in BOOTING]
-    dead = [i for i in inst if status_of(i) not in RUNNING | BOOTING]
-    print(f"label={LABEL}: running={len(running)} booting={len(booting)} "
+    dead = [i for i in inst if status_of(i) in TERMINAL]
+    # kept = running + still-booting + any UNKNOWN status: everything we don't destroy,
+    # and everything that counts toward capacity (so a slow ~7min image pull, reported
+    # as a booting/unknown status, doesn't trigger a duplicate rent next cycle).
+    kept = [i for i in inst if status_of(i) not in TERMINAL]
+    print(f"label={LABEL}: running={len(running)} kept(incl. booting)={len(kept)} "
           f"dead={len(dead)} desired={DESIRED}")
 
     for i in dead:
         print(f"  destroying dead instance {i['id']} (status={status_of(i)})")
         vast(["destroy", "instance", str(i["id"])])
 
-    # booting instances count toward desired so a slow ~7min image pull doesn't cause
-    # over-provisioning on the next cycle.
-    have = len(running) + len(booting)
+    have = len(kept)
     need = max(0, DESIRED - have)
+    rented = 0
     if need:
         print(f"  need {need} more to reach desired={DESIRED}")
+        tried = set()
         for _ in range(need):
-            rent_replacement()
+            oid = rent_replacement(exclude=tried)
+            if oid is None:
+                break  # no offer available / create failed — retry next cycle
+            tried.add(oid)
+            rented += 1
     else:
         print("  fleet at desired capacity")
 
-    ping_heartbeat()
+    # Ping the dead-man's switch only if capacity is met or we made progress toward it.
+    # If we needed boxes and rented NONE (no affordable offer / vast rejecting creates),
+    # skip the ping so a fleet stuck below desired surfaces as a missed heartbeat rather
+    # than silently looking healthy.
+    if need == 0 or rented > 0:
+        ping_heartbeat()
+    else:
+        print("  needed capacity but rented none — skipping heartbeat so the shortfall alerts")
     return 0
 
 

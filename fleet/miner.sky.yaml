@@ -9,9 +9,9 @@
 #   pip install "skypilot[aws,gcp,lambda,runpod,vast]"   # enable the providers you use
 #   sky check                                             # verify credentials
 #   sky jobs launch -n lattice-miner --use-spot fleet/miner.sky.yaml
-#   sky jobs queue                # status
-#   sky jobs logs lattice-miner   # live mining logs
-#   sky jobs cancel lattice-miner # stop
+#   sky jobs queue                   # status
+#   sky jobs logs -n lattice-miner   # live mining logs
+#   sky jobs cancel -n lattice-miner # stop
 #
 # The image is self-contained + STATELESS — its node re-syncs from built-in seeds on
 # boot — so recovery is just re-provision + restart; no checkpointing needed.
@@ -29,11 +29,22 @@ resources:
   # The miner runs on any CUDA GPU — list a set and SkyPilot uses the cheapest
   # AVAILABLE across your enabled clouds. Trim/extend for your budget (the SHA-256
   # PoW worker needs almost no VRAM, so cheap cards are fine).
-  accelerators: {RTX3060:1, RTX3070:1, RTX3080:1, RTX3090:1, RTX4090:1, L4:1, T4:1, A10:1}
+  # CAVEATS: (1) SkyPilot has NO price ceiling here — it picks the cheapest *available*
+  # card in this set, so if the cheap ones (T4/L4/RTX3060) are unavailable it will
+  # provision a 4090/A10 spot instance at several × the cost. Trim the pricey cards for
+  # a hard budget. (2) names must match SkyPilot's catalog (`sky show-gpus`) for an
+  # ENABLED cloud or they're silently skipped — e.g. AWS lists the A10 as `A10G`, and
+  # the consumer RTX cards are catalogued mainly on RunPod/Vast (the same marketplaces
+  # where docker-as-task is limited; see the note below).
+  accelerators: {RTX3060:1, RTX3070:1, RTX3080:1, RTX3090:1, RTX4090:1, L4:1, T4:1, A10:1, A10G:1}
   use_spot: true
   disk_size: 40
   image_id: docker:ghcr.io/adalinxx/lattice-miner-gpu:main
-  # Spot preemptions recover automatically; this also restarts on transient non-zero exits.
+  # Spot preemptions recover UNBOUNDED (re-provision + restart). max_restarts_on_errors
+  # caps recovery from NON-ZERO-EXIT crashes only: after 3 crash-restarts the managed job
+  # goes FAILED and stops mining — it will NOT self-heal, and nothing here alerts on that
+  # (wire a heartbeat or watch `sky jobs queue`). Raise the cap if you'd rather it keep
+  # trying through a crash-loop.
   job_recovery:
     max_restarts_on_errors: 3
 

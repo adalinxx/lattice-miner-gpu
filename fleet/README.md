@@ -30,15 +30,22 @@ the miner is stateless, that's all the resilience it needs (no checkpointing).
 pip install "skypilot[aws,gcp,lambda,runpod,vast]"   # enable the providers you use
 sky check                                             # verify credentials
 sky jobs launch -n lattice-miner --use-spot fleet/miner.sky.yaml
-sky jobs queue                # status
-sky jobs logs lattice-miner   # live mining logs
-sky jobs cancel lattice-miner # stop
+sky jobs queue                   # status
+sky jobs logs -n lattice-miner   # live mining logs
+sky jobs cancel -n lattice-miner # stop
 ```
 
 The task spec is [`fleet/miner.sky.yaml`](miner.sky.yaml) — a set of acceptable GPUs
 (cheapest-available wins), `use_spot`, and the miner's entrypoint. Run several by
 launching more managed jobs, and spread them across regions/providers to decorrelate
 preemptions.
+
+Two footguns to know (both documented inline in the spec): SkyPilot enforces **no price
+ceiling** — it takes the cheapest *available* card in the set, so trim the pricey ones
+(4090/A10) for a hard budget; and `job_recovery.max_restarts_on_errors` means a job that
+**crash-loops** (non-zero exit) gives up after 3 tries and won't self-heal — spot
+preemptions still recover unbounded, but wire a heartbeat / watch `sky jobs queue` to
+catch a crashed job.
 
 > **Marketplace caveat.** SkyPilot's docker-image-as-task support is first-class on
 > AWS/GCP/Azure/Lambda but newer/limited on **Vast.ai and RunPod** (SkyPilot's own docs

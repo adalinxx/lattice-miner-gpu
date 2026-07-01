@@ -38,7 +38,7 @@ jobs:
         env:
           VAST_API_KEY: ${{ secrets.VAST_API_KEY }}
           FLEET_HEARTBEAT_URL: ${{ secrets.FLEET_HEARTBEAT_URL }}
-          FLEET_LABEL: ${{ vars.FLEET_LABEL || 'nexus-3060-prod' }}
+          FLEET_LABEL: ${{ vars.FLEET_LABEL || 'nexus-miner' }}
           FLEET_DESIRED: ${{ github.event.inputs.desired || vars.FLEET_DESIRED || '1' }}
           FLEET_IMAGE: ${{ vars.FLEET_IMAGE || 'ghcr.io/adalinxx/lattice-miner-gpu:main' }}
           FLEET_MAX_DPH: ${{ vars.FLEET_MAX_DPH || '0.10' }}
