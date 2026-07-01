@@ -53,8 +53,12 @@ BOOTING = {"loading", "created", "scheduling"}  # counts toward desired; don't d
 
 
 def vast(args):
-    """Run a vastai CLI command, returning (stdout, ok)."""
-    r = subprocess.run([VAST, *args], capture_output=True, text=True)
+    """Run a vastai CLI command, returning (stdout, ok). Fails safe on any launch error."""
+    try:
+        r = subprocess.run([VAST, *args], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"  ! could not run vastai {' '.join(args[:2])}: {e}")
+        return "", False
     if r.returncode != 0:
         print(f"  ! vastai {' '.join(args[:2])} exit={r.returncode}: {r.stderr.strip()[:200]}")
     return r.stdout, r.returncode == 0
