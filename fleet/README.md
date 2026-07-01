@@ -1,50 +1,69 @@
-# Fleet watchdog
+# Operating the miner (provider-agnostic)
 
-Keeps a small fleet of **unreliable / ephemeral** vast.ai GPU miners alive. Ephemeral
-cloud GPUs are cattle, not pets — hosts go offline and instances get reclaimed — so the
-watchdog **reconciles** the desired number of healthy labeled instances every ~10 min:
-counts running/booting instances, destroys dead ones (so they stop billing), and re-rents
-the cheapest matching replacement. The miner container is stateless (its node re-syncs
-from built-in seeds on boot), so recovery is just "rent an equivalent box and run it."
+The miner is a **generic, self-contained container**: it bundles a full node + mining
+coordinator + CUDA worker, joins the network via **built-in seeds**, and mines
+unattended. It is **stateless** (the node re-syncs from seeds on boot) and **runs on
+any CUDA GPU on any provider** — nothing here is tied to a specific cloud or GPU model.
 
-It runs as a **GitHub Actions scheduled workflow** (`.github/workflows/watchdog.yml`) —
-off-fleet, free, secrets managed, version-controlled. It can't die with the GPUs it
-supervises.
+## 1. Run it anywhere (the baseline)
 
-## One-time setup
+On any box with an NVIDIA GPU + the NVIDIA container runtime:
 
-1. **Secret — `VAST_API_KEY`** (repo → Settings → Secrets and variables → Actions):
-   your vast.ai API key. Without it the workflow is a no-op. Never commit this.
-2. **Optional secret — `FLEET_HEARTBEAT_URL`**: a [healthchecks.io](https://healthchecks.io)
-   (free) ping URL. The watchdog pings it each successful run, so you get **alerted if the
-   watchdog itself stops running** (a dead-man's switch on your resilience layer).
-3. **Optional variables** (repo → Variables) to tune without editing code:
-   `FLEET_LABEL` (default `nexus-3060-prod`), `FLEET_DESIRED` (default `1`),
-   `FLEET_IMAGE`, `FLEET_MAX_DPH` (default `0.10` $/hr), `FLEET_QUERY`, `FLEET_DISK`.
+```bash
+docker run --gpus all -v lattice-data:/data ghcr.io/adalinxx/lattice-miner-gpu:main
+```
 
-Run it manually any time via **Actions → Fleet Watchdog → Run workflow** (optionally
-overriding the desired count).
+That's the whole miner. `libcuda` comes from the host driver; the node syncs and the
+GPU mines. This works on **any** provider (vast.ai, RunPod, Lambda, a local rig, …) —
+it's just a container.
 
-## What it does / doesn't touch
+## 2. Resilient spot mining (recommended): SkyPilot managed jobs
 
-- Acts **only** on instances carrying `FLEET_LABEL` — never your other rentals.
-- Fails safe: if the vast API is unreachable, it makes **no changes** that cycle (and
-  skips the heartbeat, so a stuck API surfaces as a missed heartbeat rather than
-  silent "healthy").
-- Counts *booting* instances toward desired, so a slow ~7 min image pull doesn't cause
-  double-renting.
+Cheap GPUs are **interruptible** (spot/marketplace hosts drop and get reclaimed), so
+the miner should be treated as cattle: replace-and-restart automatically. The
+**provider-agnostic** way to do that is [SkyPilot](https://docs.skypilot.co) **managed
+jobs** — it provisions the cheapest available matching GPU across ~25 clouds/marketplaces
+and **auto-recovers** preemptions by re-provisioning elsewhere and restarting. Because
+the miner is stateless, that's all the resilience it needs (no checkpointing).
 
-## Complementary: per-miner heartbeat (recommended)
+```bash
+pip install "skypilot[aws,gcp,lambda,runpod,vast]"   # enable the providers you use
+sky check                                             # verify credentials
+sky jobs launch -n lattice-miner --use-spot fleet/miner.sky.yaml
+sky jobs queue                # status
+sky jobs logs lattice-miner   # live mining logs
+sky jobs cancel lattice-miner # stop
+```
 
-The watchdog detects a **dead host** (instance gone/offline). It does **not** detect a
-box that's up but whose miner is *stuck* (rare, but possible). For that, have the miner
-itself ping a heartbeat while it's hashing — a short addition to `deploy/gpu-entrypoint.sh`
-(loop pinging a per-instance healthchecks URL when the coordinator is running + the GPU
-is drawing power). Ask and it can be added.
+The task spec is [`fleet/miner.sky.yaml`](miner.sky.yaml) — a set of acceptable GPUs
+(cheapest-available wins), `use_spot`, and the miner's entrypoint. Run several by
+launching more managed jobs, and spread them across regions/providers to decorrelate
+preemptions.
 
-## Scaling up later
+> **Marketplace caveat.** SkyPilot's docker-image-as-task support is first-class on
+> AWS/GCP/Azure/Lambda but newer/limited on **Vast.ai and RunPod** (SkyPilot's own docs
+> note docker-container tasks aren't fully supported on RunPod). Validate `sky jobs
+> launch` against your chosen marketplace before relying on it. If it doesn't work
+> there, fall back to option 1 (`docker run`) on that provider, or — on Vast.ai
+> specifically — the optional watchdog below.
 
-For multi-provider cheapest-GPU auto-selection or a larger fleet, graduate to
-[SkyPilot managed jobs](https://docs.skypilot.co/en/stable/examples/managed-jobs.html)
-(`sky jobs launch`), which provisions + auto-recovers across ~25 backends including
-vast.ai and RunPod. This watchdog is the minimal, zero-infra tier for a handful of boxes.
+## 3. Optional: Vast.ai-only watchdog (zero-infra alternative)
+
+If you specifically use **vast.ai** and want a zero-setup alternative to SkyPilot,
+[`examples/vast-watchdog.py`](examples/vast-watchdog.py) + the
+[`Vast.ai Watchdog`](../.github/workflows/vast-watchdog.yml) GitHub Action reconcile a
+desired number of healthy labeled instances (re-renting any that drop) on a cron,
+off-fleet. It is **provider-specific** and **inert unless you set the `VAST_API_KEY`
+secret** — a convenience, not the generic path. See the file header for config.
+
+## Observability (any of the above)
+
+Ephemeral, NAT'd boxes can't be pull-scraped, so use a **push/heartbeat** model:
+- **Dead-man's switch:** have the miner ping a [healthchecks.io](https://healthchecks.io)
+  URL while it's hashing; alert when the pings stop (GPU stopped / instance gone). A
+  small loop in `deploy/gpu-entrypoint.sh` can do this — ask and it can be added.
+- **Chain health:** poll the always-reachable node RPCs of your stable backbone for
+  height/peers (a static status page is enough).
+- If you outgrow that: agents `remote_write` to a central VictoriaMetrics (push from
+  ephemeral miners, pull-scrape the stable backbone in one system). Avoid the Prometheus
+  Pushgateway as a general bus (it loses `up` health and never expires dead series).

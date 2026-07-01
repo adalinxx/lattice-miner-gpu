@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Fleet watchdog — keep N labeled vast.ai GPU miners alive; re-rent any that drop.
+"""Vast.ai watchdog (OPTIONAL, PROVIDER-SPECIFIC example).
+
+The generic/recommended resilience layer is provider-agnostic SkyPilot managed jobs
+(see ../miner.sky.yaml + ../README.md). This is a self-contained convenience for
+operators who specifically use vast.ai and want a zero-infra alternative to SkyPilot.
+
+Keep N labeled vast.ai GPU miners alive; re-rent any that drop.
 
 Ephemeral cloud-rental GPUs are cattle, not pets: hosts go offline and instances get
 reclaimed. This runs periodically (GitHub Actions cron) and RECONCILES the desired
@@ -18,12 +24,13 @@ seeds on boot), so "recovery" is simply "rent an equivalent box and run the imag
 no checkpoint/restore needed.
 
 Config (env; all optional except the API key, set on the vastai CLI beforehand):
-  FLEET_LABEL          instance label to manage           (default nexus-3060-prod)
+  FLEET_LABEL          instance label to manage           (default nexus-miner)
   FLEET_DESIRED        how many healthy instances to hold  (default 1)
   FLEET_IMAGE          miner image                         (default ghcr.io/adalinxx/lattice-miner-gpu:main)
   FLEET_ONSTART        onstart command                     (default /usr/local/bin/gpu-entrypoint)
   FLEET_DISK           disk GB                             (default 32)
-  FLEET_QUERY          vastai offer search query           (default cheapest reliable RTX 3060, CUDA>=12.6)
+  FLEET_QUERY          vastai offer search query           (default: cheapest reliable single
+                                                            CUDA>=12.6 GPU of ANY model)
   FLEET_MAX_DPH        do not rent above this $/hr          (default 0.10)
   FLEET_HEARTBEAT_URL  dead-man's-switch ping (e.g. healthchecks.io)  (default none)
   VASTAI_BIN           vastai CLI path                     (default vastai)
@@ -35,15 +42,20 @@ import sys
 import urllib.request
 
 VAST = os.environ.get("VASTAI_BIN", "vastai")
-LABEL = os.environ.get("FLEET_LABEL", "nexus-3060-prod")
+LABEL = os.environ.get("FLEET_LABEL", "nexus-miner")
 DESIRED = int(os.environ.get("FLEET_DESIRED", "1"))
 IMAGE = os.environ.get("FLEET_IMAGE", "ghcr.io/adalinxx/lattice-miner-gpu:main")
 ONSTART = os.environ.get("FLEET_ONSTART", "/usr/local/bin/gpu-entrypoint")
 DISK = os.environ.get("FLEET_DISK", "32")
+# GPU-model-AGNOSTIC by design: the miner runs on any CUDA GPU, so rent the cheapest
+# suitable card of ANY model. cuda_vers>=12.6 = the host driver can run the image's
+# CUDA 12.6 kernels; a modest inet floor avoids a box that takes forever to pull the
+# image. rent_replacement() sorts by price and picks the cheapest. Narrow it (e.g. a
+# specific gpu_name, more VRAM) via the FLEET_QUERY env var if you ever want to.
 QUERY = os.environ.get(
     "FLEET_QUERY",
-    "rentable=true verified=true num_gpus=1 gpu_name=RTX_3060 cuda_vers>=12.6 "
-    f"disk_space>={DISK} reliability>0.98",
+    "rentable=true verified=true num_gpus=1 cuda_vers>=12.6 "
+    f"disk_space>={DISK} reliability>0.98 inet_down>=100",
 )
 MAX_DPH = float(os.environ.get("FLEET_MAX_DPH", "0.10"))
 HEARTBEAT_URL = os.environ.get("FLEET_HEARTBEAT_URL", "").strip()

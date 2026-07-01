@@ -1,9 +1,11 @@
-name: Fleet Watchdog
+name: Vast.ai Watchdog (optional example)
 
-# Keeps the vast.ai GPU miner fleet alive: reconciles the desired number of healthy
-# labeled instances, re-renting any that drop. Runs off-fleet (GitHub-hosted) so it
-# can't die with the GPUs it supervises. Configure VAST_API_KEY (required) and the
-# optional FLEET_* repo variables/secrets. Runs read-only unless VAST_API_KEY is set.
+# OPTIONAL, PROVIDER-SPECIFIC. The generic/recommended fleet resilience layer is
+# provider-agnostic SkyPilot managed jobs (see fleet/miner.sky.yaml + fleet/README.md).
+# This is a self-contained convenience for operators who specifically use vast.ai:
+# it reconciles the desired number of healthy labeled instances and re-rents any that
+# drop, running off-fleet (GitHub-hosted) so it can't die with the GPUs it supervises.
+# It is a NO-OP unless the VAST_API_KEY secret is set, so it's inert by default.
 
 on:
   schedule:
@@ -47,4 +49,4 @@ jobs:
             echo "VAST_API_KEY secret is not set — nothing to do."; exit 0
           fi
           vastai set api-key "$VAST_API_KEY" >/dev/null
-          python fleet/watchdog.py
+          python fleet/examples/vast-watchdog.py
