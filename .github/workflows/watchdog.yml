@@ -1,0 +1,50 @@
+name: Fleet Watchdog
+
+# Keeps the vast.ai GPU miner fleet alive: reconciles the desired number of healthy
+# labeled instances, re-renting any that drop. Runs off-fleet (GitHub-hosted) so it
+# can't die with the GPUs it supervises. Configure VAST_API_KEY (required) and the
+# optional FLEET_* repo variables/secrets. Runs read-only unless VAST_API_KEY is set.
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'   # every 10 minutes
+  workflow_dispatch:          # manual "reconcile now"
+    inputs:
+      desired:
+        description: 'Override desired instance count for this run'
+        required: false
+
+concurrency:
+  group: fleet-watchdog       # never overlap two reconcile runs
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install vastai CLI
+        run: pip install --quiet vastai
+
+      - name: Reconcile fleet
+        env:
+          VAST_API_KEY: ${{ secrets.VAST_API_KEY }}
+          FLEET_HEARTBEAT_URL: ${{ secrets.FLEET_HEARTBEAT_URL }}
+          FLEET_LABEL: ${{ vars.FLEET_LABEL || 'nexus-3060-prod' }}
+          FLEET_DESIRED: ${{ github.event.inputs.desired || vars.FLEET_DESIRED || '1' }}
+          FLEET_IMAGE: ${{ vars.FLEET_IMAGE || 'ghcr.io/adalinxx/lattice-miner-gpu:main' }}
+          FLEET_MAX_DPH: ${{ vars.FLEET_MAX_DPH || '0.10' }}
+          FLEET_QUERY: ${{ vars.FLEET_QUERY }}
+          FLEET_DISK: ${{ vars.FLEET_DISK || '32' }}
+        run: |
+          if [ -z "$VAST_API_KEY" ]; then
+            echo "VAST_API_KEY secret is not set — nothing to do."; exit 0
+          fi
+          vastai set api-key "$VAST_API_KEY" >/dev/null
+          python fleet/watchdog.py
