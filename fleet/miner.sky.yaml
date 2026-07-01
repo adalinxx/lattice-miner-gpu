@@ -56,8 +56,8 @@ resources:
 #   CHILD_CHAINS: "toy"    # MERGED/MULTI-CHAIN mining — SINGLE-BOX ONLY, see caveat:
 # CHILD_CHAINS makes this box also deploy + merge-mine a child of Nexus. DO NOT set it on
 # the auto-recovering MANAGED-JOB fleet: each deploy builds a FRESH genesis (now()), so
-# every recovered/replicated replica would fork its OWN divergent child instead of sharing
-# one. Use it only for a deliberate single-box run — `sky launch` (not `sky jobs launch`)
+# every recovery epoch forks its OWN divergent child instead of continuing one. Use it
+# only for a deliberate single-box run — `sky launch` (not `sky jobs launch`)
 # of ONE instance, or a plain `docker run -e CHILD_CHAINS=toy …`.
 envs: {}
 
