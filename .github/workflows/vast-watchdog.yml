@@ -1,0 +1,52 @@
+name: Vast.ai Watchdog (optional example)
+
+# OPTIONAL, PROVIDER-SPECIFIC. The generic/recommended fleet resilience layer is
+# provider-agnostic SkyPilot managed jobs (see fleet/miner.sky.yaml + fleet/README.md).
+# This is a self-contained convenience for operators who specifically use vast.ai:
+# it reconciles the desired number of healthy labeled instances and re-rents any that
+# drop, running off-fleet (GitHub-hosted) so it can't die with the GPUs it supervises.
+# It is a NO-OP unless the VAST_API_KEY secret is set, so it's inert by default.
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'   # every 10 minutes
+  workflow_dispatch:          # manual "reconcile now"
+    inputs:
+      desired:
+        description: 'Override desired instance count for this run'
+        required: false
+
+concurrency:
+  group: fleet-watchdog       # never overlap two reconcile runs
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install vastai CLI
+        run: pip install --quiet vastai
+
+      - name: Reconcile fleet
+        env:
+          VAST_API_KEY: ${{ secrets.VAST_API_KEY }}
+          FLEET_HEARTBEAT_URL: ${{ secrets.FLEET_HEARTBEAT_URL }}
+          FLEET_LABEL: ${{ vars.FLEET_LABEL || 'nexus-miner' }}
+          FLEET_DESIRED: ${{ github.event.inputs.desired || vars.FLEET_DESIRED || '1' }}
+          FLEET_IMAGE: ${{ vars.FLEET_IMAGE || 'ghcr.io/adalinxx/lattice-miner-gpu:main' }}
+          FLEET_MAX_DPH: ${{ vars.FLEET_MAX_DPH || '0.10' }}
+          FLEET_QUERY: ${{ vars.FLEET_QUERY }}
+          FLEET_DISK: ${{ vars.FLEET_DISK || '32' }}
+        run: |
+          if [ -z "$VAST_API_KEY" ]; then
+            echo "VAST_API_KEY secret is not set — nothing to do."; exit 0
+          fi
+          vastai set api-key "$VAST_API_KEY" >/dev/null
+          python fleet/examples/vast-watchdog.py
