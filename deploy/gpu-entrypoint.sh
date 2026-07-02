@@ -44,8 +44,13 @@
 #   MINER_BATCH_SIZE  nonces per GPU dispatch (default 2e9; large = efficient on GPU)
 #   EXTRA_NODE_ARGS   extra lattice-node flags (e.g. --coinbase-address <addr>)
 #   EXTRA_MINER_ARGS  extra coordinator flags
-#   CHILD_CHAINS      space/comma-separated child directory name(s) to deploy under
-#                     Nexus and merge-mine (e.g. "toy"). Empty = single-chain (default).
+#   CHILD_CHAINS      space/comma-separated child directory name(s) to merge-mine under
+#                     Nexus (e.g. "toy"). Empty = single-chain (default).
+#   CHILD_GENESIS_HEX JOIN an existing, ANCHORED child instead of deploying a fresh one:
+#                     boot from this genesis-hex so this box mines the SAME chain other
+#                     nodes serve (single-child; pair with CHILD_PEERS). Unset = deploy fresh.
+#   CHILD_PEERS       space/comma-separated P2P peers (pubkey@host:port) to --peer for the
+#                     child, e.g. a public serving hub — so mined blocks propagate node→node.
 #   CHILD_BOOT_TIMEOUT  seconds to wait for a child to become mineable before skipping
 #                       it and mining without it                       (default 180)
 #   CHILD_* deploy params (applied to every child in CHILD_CHAINS):
@@ -136,6 +141,12 @@ ensure_child() {  # $1=dir  $2=index  (uses globals: NEXUS_DIR, PARENT_P2P)
   #                                    -> GET /chain/genesis to reuse the existing genesis.
   if [ -s "$deployFile" ]; then
     echo "[gpu-miner]   reusing saved deploy for '${dir}' (restart) — re-spawning from persisted genesis"
+  elif [ -n "${CHILD_GENESIS_HEX:-}" ]; then
+    # JOIN an existing, anchored child (shared across nodes): boot from the given genesis-hex
+    # instead of deploying a fresh one. Pair with CHILD_PEERS to peer other nodes serving it,
+    # so blocks propagate (this box becomes a full node that peers, not an isolated deploy).
+    echo "[gpu-miner]   JOINING existing child '${dir}' from CHILD_GENESIS_HEX (no deploy)"
+    printf '{"genesisHex":"%s"}' "$CHILD_GENESIS_HEX" > "$deployFile"
   else
     local body
     body=$(printf '{"directory":"%s","parentDirectory":"%s","chainPath":["%s","%s"],"targetBlockTime":%s,"initialReward":%s,"halvingInterval":%s,"premine":%s,"maxTransactionsPerBlock":%s,"maxStateGrowth":%s,"maxBlockSize":%s,"retargetWindow":%s,"wasmPolicies":[],"startMining":false}' \
@@ -164,13 +175,18 @@ ensure_child() {  # $1=dir  $2=index  (uses globals: NEXUS_DIR, PARENT_P2P)
   # Spawn the child as its own process, subscribed to the local Nexus P2P (per the
   # runbook: boots from embedded genesis, extracts blocks from the parent). --no-dns-seeds
   # because a child never joins mainnet gossip; it gets everything from the parent.
+  # --peer the parent-side gossip endpoint, plus any CHILD_PEERS (other nodes serving this
+  # child, e.g. a public hub) so blocks propagate node→node over the child's own P2P.
+  local -a peerArgs=(--peer "${chainP2P:-$PARENT_P2P}")
+  local p
+  for p in ${CHILD_PEERS//,/ }; do [ -n "$p" ] && peerArgs+=(--peer "$p"); done
   # shellcheck disable=SC2086
   lattice-node \
     --genesis-hex "$ghex" \
     --chain-directory "$dir" \
     --chain-path "${NEXUS_DIR}/${dir}" \
     --subscribe-p2p "$PARENT_P2P" \
-    --peer "${chainP2P:-$PARENT_P2P}" \
+    "${peerArgs[@]}" \
     --port "$cp2p" --rpc-port "$crpc" --data-dir "$childDir" \
     --no-dns-seeds &
   CHILD_PIDS+=( $! )
