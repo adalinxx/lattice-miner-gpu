@@ -149,6 +149,14 @@ ensure_child() {  # $1=dir  $2=index  (uses globals: NEXUS_DIR, PARENT_P2P)
   #                                    -> GET /chain/genesis to reuse the existing genesis.
   if [ -s "$deployFile" ]; then
     echo "[gpu-miner]   reusing saved deploy for '${dir}' (restart) — re-spawning from persisted genesis"
+  elif [ -n "${CHILD_GENESIS_HEX:-}" ]; then
+    # JOIN an existing ANCHORED child from its genesis-hex, spawned as a proper CHILD of the
+    # local Nexus (its own identity, --subscribe-p2p the local parent). This is the correct
+    # topology — a standalone toy-only node reuses one identity for parent-sub + chain-gossip
+    # and FLAPS (duplicate-identity eviction). Same-chain peers are then found via the parent
+    # getChildPeers rendezvous. Single-child; unset = deploy fresh.
+    echo "[gpu-miner]   JOINING anchored child '${dir}' from CHILD_GENESIS_HEX (proper child of local Nexus)"
+    printf '{"genesisHex":"%s"}' "$CHILD_GENESIS_HEX" > "$deployFile"
   else
     local body
     body=$(printf '{"directory":"%s","parentDirectory":"%s","chainPath":["%s","%s"],"targetBlockTime":%s,"initialReward":%s,"halvingInterval":%s,"premine":%s,"maxTransactionsPerBlock":%s,"maxStateGrowth":%s,"maxBlockSize":%s,"retargetWindow":%s,"wasmPolicies":[],"startMining":false}' \
