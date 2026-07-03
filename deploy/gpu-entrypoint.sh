@@ -259,6 +259,24 @@ if [ "${#FOLLOWS[@]}" -gt 0 ]; then
       echo "[gpu-miner] WARNING: follow '${path}' failed (HTTP ${code}): $(head -c 160 /tmp/follow.out 2>/dev/null) — mining without it" >&2
     fi
   done
+
+  # MINE AFTER SYNCING. follow is ASYNC — the reconciler resolves each child's genesis (via
+  # the rendezvous) + syncs + registers it over the next minutes. The coordinator snapshots
+  # its mineable chains at STARTUP, so if we start it now it never picks the child up. Wait
+  # until every followed child is folded into the node's merged template (childBlocks) before
+  # starting the coordinator. Best-effort: after the timeout, start anyway with whatever synced.
+  want=(); for p in "${FOLLOWS[@]}"; do [ -n "$p" ] && want+=("${p##*/}"); done
+  ftimeout="${CHILD_FOLLOW_TIMEOUT:-900}"; fwaited=0
+  echo "[gpu-miner] waiting for followed child(ren) [${want[*]}] to sync into the merged template before mining (timeout ${ftimeout}s)…"
+  until [ "$fwaited" -ge "$ftimeout" ]; do
+    rpc_post "/chain/template" /tmp/tmpl.out '{}' >/dev/null 2>&1
+    cb=$(jq -r 'try (.childBlocks | keys[]) catch empty' /tmp/tmpl.out 2>/dev/null)
+    missing=false
+    for d in "${want[@]}"; do printf '%s\n' "$cb" | grep -qxF "$d" || missing=true; done
+    if ! $missing; then echo "[gpu-miner]   followed child(ren) present in merged template — starting miner"; break; fi
+    sleep 10; fwaited=$(( fwaited + 10 ))
+  done
+  [ "$fwaited" -ge "$ftimeout" ] && echo "[gpu-miner] WARNING: not all followed children synced after ${ftimeout}s — mining what is available" >&2
 fi
 
 # GPU batch size: the coordinator default (10k nonces/batch) is tuned for CPU workers.
