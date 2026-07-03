@@ -19,14 +19,17 @@ RUN cargo build --release --features cuda
 FROM ghcr.io/adalinxx/lattice-node:main AS node
 
 # ── Stage 2: the self-contained GPU miner ─────────────────────────────────────
-# The devel base guarantees libnvrtc (cudarc NVRTC-compiles the kernel at run time);
-# libcuda.so.1 is injected from the host driver by the NVIDIA container runtime. The
-# Swift binaries are static-swift-stdlib but still link the node's shared apt deps,
-# so install the same set the node image uses.
-FROM nvidia/cuda:12.6.1-devel-ubuntu22.04
+# RUNTIME base (not devel): the only CUDA piece needed at run time is libnvrtc (cudarc
+# NVRTC-compiles the kernel); libcuda.so.1 is injected from the host driver by the NVIDIA
+# container runtime. The devel base drags in the whole toolkit (~7GB unpacked → slow cold
+# pulls on every fresh rental host); runtime + the single cuda-nvrtc package is ~half that.
+# The Swift binaries are static-swift-stdlib but still link the node's shared apt deps, so
+# install the same set the node image uses.
+FROM nvidia/cuda:12.6.1-runtime-ubuntu22.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    cuda-nvrtc-12-6 \
     curl \
     dnsutils \
     jq \
