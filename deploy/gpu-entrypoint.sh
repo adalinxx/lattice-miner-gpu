@@ -50,6 +50,12 @@
 #                     to FOLLOW + merge-mine (e.g. "Nexus/toy"). The node resolves genesis +
 #                     peers itself and the coordinator auto-includes them (no --child-node).
 #                     This is how MANY boxes share ONE child; use instead of CHILD_CHAINS.
+#   CHILD_COINBASE    payout address to credit in each entrypoint-spawned child's coinbase
+#                     (CHILD_CHAINS / CHILD_GENESIS_HEX). Without it the child mines
+#                     empty-reward templates and forfeits its block reward. (CHILD_FOLLOW
+#                     children inherit the node's --coinbase-address automatically.)
+#   CHILD_EXTERNAL_HOST public host a spawned child advertises for chain-gossip (cloud/NAT);
+#                     expose the child p2p port too. Unset = loopback (local only).
 #   CHILD_BOOT_TIMEOUT  seconds to wait for a child to become mineable before skipping
 #                       it and mining without it                       (default 180)
 #   CHILD_* deploy params (applied to every child in CHILD_CHAINS):
@@ -194,6 +200,7 @@ ensure_child() {  # $1=dir  $2=index  (uses globals: NEXUS_DIR, PARENT_P2P)
     --peer "${chainP2P:-$PARENT_P2P}" \
     --port "$cp2p" --rpc-port "$crpc" --data-dir "$childDir" \
     ${CHILD_EXTERNAL_HOST:+--external-address "${CHILD_EXTERNAL_HOST}:${cp2p}"} \
+    ${CHILD_COINBASE:+--coinbase-address "${CHILD_COINBASE}"} \
     --no-dns-seeds &
   CHILD_PIDS+=( $! )
 
