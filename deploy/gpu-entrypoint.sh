@@ -44,8 +44,12 @@
 #   MINER_BATCH_SIZE  nonces per GPU dispatch (default 2e9; large = efficient on GPU)
 #   EXTRA_NODE_ARGS   extra lattice-node flags (e.g. --coinbase-address <addr>)
 #   EXTRA_MINER_ARGS  extra coordinator flags
-#   CHILD_CHAINS      space/comma-separated child directory name(s) to deploy under
-#                     Nexus and merge-mine (e.g. "toy"). Empty = single-chain (default).
+#   CHILD_CHAINS      space/comma-separated child directory name(s) to DEPLOY (fresh
+#                     genesis) under Nexus and merge-mine. SINGLE-BOX only. Empty = default.
+#   CHILD_FOLLOW      space/comma-separated full chain path(s) of EXISTING anchored children
+#                     to FOLLOW + merge-mine (e.g. "Nexus/toy"). The node resolves genesis +
+#                     peers itself and the coordinator auto-includes them (no --child-node).
+#                     This is how MANY boxes share ONE child; use instead of CHILD_CHAINS.
 #   CHILD_BOOT_TIMEOUT  seconds to wait for a child to become mineable before skipping
 #                       it and mining without it                       (default 180)
 #   CHILD_* deploy params (applied to every child in CHILD_CHAINS):
@@ -64,6 +68,15 @@ mkdir -p "$DATA_DIR"
 CHILD_CHAINS="${CHILD_CHAINS:-}"
 read -r -a CHILDREN <<< "${CHILD_CHAINS//,/ }"
 CHILD_BOOT_TIMEOUT="${CHILD_BOOT_TIMEOUT:-180}"
+
+# CHILD_FOLLOW: full chain path(s) of EXISTING, anchored children to FOLLOW (not deploy),
+# e.g. "Nexus/toy". The node runs with --supervise-children and resolves each child's
+# genesis (from its synced parent GenesisState) + peers (child-peer rendezvous) ON ITS OWN;
+# the coordinator then auto-mines them (node folds served children into the merged template
+# — no --child-node). This is how MANY boxes share ONE anchored child, unlike CHILD_CHAINS
+# (which deploys a fresh, single-box genesis).
+CHILD_FOLLOW="${CHILD_FOLLOW:-}"
+read -r -a FOLLOWS <<< "${CHILD_FOLLOW//,/ }"
 
 # Child deploy defaults (mirror SmokeTests spawnChild), overridable via env.
 CHILD_TARGET_BLOCK_TIME="${CHILD_TARGET_BLOCK_TIME:-1000}"
@@ -199,8 +212,13 @@ ensure_child() {  # $1=dir  $2=index  (uses globals: NEXUS_DIR, PARENT_P2P)
 
 echo "[gpu-miner] starting Nexus node (built-in seeds, default key-bits → source-agnostic sync)…"
 [ "${#CHILDREN[@]}" -gt 0 ] && echo "[gpu-miner] merged mining requested for child chain(s): ${CHILDREN[*]}"
+# --supervise-children lets the node spawn + sync the chains named in CHILD_FOLLOW from a
+# durable follow intent (it resolves their genesis + peers itself). Only enabled when
+# following, so a plain miner is unchanged.
+SUPERVISE_ARG=""
+[ "${#FOLLOWS[@]}" -gt 0 ] && SUPERVISE_ARG="--supervise-children"
 # shellcheck disable=SC2086
-lattice-node --autosize --data-dir "$DATA_DIR" --rpc-port "$RPC_PORT" ${EXTRA_NODE_ARGS:-} &
+lattice-node --autosize --data-dir "$DATA_DIR" --rpc-port "$RPC_PORT" $SUPERVISE_ARG ${EXTRA_NODE_ARGS:-} &
 NODE_PID=$!
 # On teardown, stop the coordinator's node tree. (In a container, exiting the main
 # process tears everything down anyway; this covers the pre-coordinator setup phase.)
@@ -224,6 +242,23 @@ if [ "${#CHILDREN[@]}" -gt 0 ]; then
     done
     [ "$established" -eq 0 ] && echo "[gpu-miner] NOTE: no requested child chains are available — mining Nexus only" >&2
   fi
+fi
+
+# Follow existing anchored children (CHILD_FOLLOW). The node resolves genesis + peers and
+# supervises the child; once it's synced + registered the coordinator auto-includes it in
+# the merged template (no --child-node here). Idempotent: re-follow each boot is harmless.
+if [ "${#FOLLOWS[@]}" -gt 0 ]; then
+  for path in "${FOLLOWS[@]}"; do
+    [ -z "$path" ] && continue
+    jarr=$(printf '%s' "$path" | jq -Rc 'split("/")')
+    echo "[gpu-miner] following existing child chain '${path}' (node resolves genesis + peers via rendezvous)…"
+    code=$(rpc_post "/chain/follow" /tmp/follow.out "$(printf '{"chainPath":%s}' "$jarr")") || code=000
+    if [ "$code" = "200" ]; then
+      echo "[gpu-miner]   follow '${path}' accepted — auto-mined once synced + registered"
+    else
+      echo "[gpu-miner] WARNING: follow '${path}' failed (HTTP ${code}): $(head -c 160 /tmp/follow.out 2>/dev/null) — mining without it" >&2
+    fi
+  done
 fi
 
 # GPU batch size: the coordinator default (10k nonces/batch) is tuned for CPU workers.
