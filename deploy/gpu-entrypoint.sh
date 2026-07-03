@@ -193,6 +193,7 @@ ensure_child() {  # $1=dir  $2=index  (uses globals: NEXUS_DIR, PARENT_P2P)
     --subscribe-p2p "$PARENT_P2P" \
     --peer "${chainP2P:-$PARENT_P2P}" \
     --port "$cp2p" --rpc-port "$crpc" --data-dir "$childDir" \
+    ${CHILD_EXTERNAL_HOST:+--external-address "${CHILD_EXTERNAL_HOST}:${cp2p}"} \
     --no-dns-seeds &
   CHILD_PIDS+=( $! )
 
