@@ -52,5 +52,9 @@ jobs:
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Always re-pull the `FROM ghcr.io/adalinxx/lattice-node:main` base so a gpu-image build
+          # picks up the latest node binary. Without this, gha cache pins a stale base and the
+          # image ships an old node even after the node repo has moved on.
+          pull: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
