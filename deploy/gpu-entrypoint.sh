@@ -200,6 +200,7 @@ ensure_child() {  # $1=dir  $2=index  (uses globals: NEXUS_DIR, PARENT_P2P)
     --port "$cp2p" --rpc-port "$crpc" --data-dir "$childDir" \
     ${CHILD_EXTERNAL_HOST:+--external-address "${CHILD_EXTERNAL_HOST}:${cp2p}"} \
     ${CHILD_COINBASE:+--coinbase-address "${CHILD_COINBASE}"} \
+    ${CHILD_EXTRA_ARGS:-} \
     --no-dns-seeds &
   CHILD_PIDS+=( $! )
 
