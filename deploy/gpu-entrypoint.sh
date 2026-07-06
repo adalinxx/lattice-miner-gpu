@@ -317,3 +317,5 @@ exec stdbuf -oL -eL lattice-mining-coordinator \
   --batch-size "$MINER_BATCH_SIZE" \
   ${CHILD_COORD_ARGS[@]+"${CHILD_COORD_ARGS[@]}"} \
   ${EXTRA_MINER_ARGS:-}
+
+# rebuild: pick up lattice-node:main #17 (proof self-heal on reconnect)
