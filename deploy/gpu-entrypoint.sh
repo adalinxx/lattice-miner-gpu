@@ -302,6 +302,14 @@ fi
 MINER_BATCH_SIZE="${MINER_BATCH_SIZE:-2000000000}"
 
 nchild=$(( ${#CHILD_COORD_ARGS[@]} / 2 ))
+# Serve-only: a sync/serve node (e.g. a CPU seed that cannot and must not mine) runs the
+# Nexus node + child chains but NO mining coordinator. Stay alive on the node process; the
+# already-spawned children keep syncing and serving. Select with MINER_BACKEND=none.
+if [ "${MINER_BACKEND:-cuda}" = "none" ]; then
+  echo "[gpu-miner] SERVE-ONLY (MINER_BACKEND=none): Nexus node + ${nchild} child chain(s) sync/serve, no mining coordinator"
+  wait "$NODE_PID"
+  exit $?
+fi
 echo "[gpu-miner] starting coordinator (${MINER_BACKEND:-cuda}, ${MINER_WORKERS:-1} worker(s), batch ${MINER_BATCH_SIZE}$([ "$nchild" -gt 0 ] && echo ", +${nchild} child chain(s)"))"
 # The coordinator has no --backend flag and never passes one to the worker, so the GPU
 # backend is forced by the cuda-worker shim (which reads MINER_BACKEND from the env).
