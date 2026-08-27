@@ -20,6 +20,11 @@
 #                 (default: the mainnet backbones + the testnet follower)
 #   CHILD_PATH    absolute child path to adopt (default Nexus/testnet);
 #                 set empty to mine Nexus only
+#   CHILD_PEERS   space-separated publicKey@host:port CHILD-overlay peers — a
+#                 freshly adopting child has no same-chain peers yet, and the
+#                 genesis CONTENT lives with child-chain peers (the parent
+#                 records only the CID), so seed at least one reachable child
+#                 node (default: the public testnet follower's child process)
 #   WORKERS       GPU worker processes (default 1; one drives the whole GPU)
 #   BATCH_SIZE    nonce span per worker per iteration (default 2_000_000_000)
 #   REWARD_BATCH  pre-signed `lattice-rewards emit-batch` file; mining waits
@@ -30,6 +35,7 @@ set -eu
 
 ROOT="${DATA_DIR:-/data}"
 CHILD_PATH="${CHILD_PATH-Nexus/testnet}"
+CHILD_PEERS="${CHILD_PEERS:-4217434b1737604b8236188b475b8936eaffda9fec7232a161ccbf37421888fc@lattice-mainnet-testnet.fly.dev:4101}"
 NEXUS_PEERS="${NEXUS_PEERS:-139b8f3639e7c515417c63bd3a652a5c6fd4a1a2d0baed8e33ea63047995fe64@lattice-mainnet-iad.fly.dev:4001 35edf67bfe3d612aeb1f0e25da9d3f0ced44dbf79d34f00c548cf9005be6eb7d@lattice-mainnet-ams.fly.dev:4001 9cace839489acb30385a9f20025cb9d6365283c81dce14cadab26507065acd4e@lattice-mainnet-sjc.fly.dev:4001 57f80deb3b00da1b14b630638a4d0307be98126ec1d550476e4889087bb22d0f@lattice-mainnet-testnet.fly.dev:4001}"
 WORKERS="${WORKERS:-1}"
 BATCH_SIZE="${BATCH_SIZE:-2000000000}"
@@ -46,11 +52,17 @@ peers_json="${peers_json%,}"
 
 child_json=""
 if [ -n "$CHILD_PATH" ]; then
+    child_peers_json=""
+    for peer in $CHILD_PEERS; do
+        child_peers_json="$child_peers_json\"$peer\","
+    done
+    child_peers_json="${child_peers_json%,}"
     child_json=",
     \"$CHILD_PATH\": {
       \"listen\": 4101,
       \"fact\": 4102,
-      \"rpc\": 8180
+      \"rpc\": 8180,
+      \"peers\": [$child_peers_json]
     }"
 fi
 
