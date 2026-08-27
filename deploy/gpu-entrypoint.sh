@@ -1,329 +1,114 @@
-#!/usr/bin/env bash
-# Self-contained GPU miner entrypoint.
+#!/bin/sh
+# Self-starting merged miner (current lattice-node architecture): one GPU box
+# runs a Nexus node plus an adopted child chain under `lattice up --foreground`
+# (the supervisor restarts either process), and drives mining through the
+# reference mine-supervisor once the parent is synced. ONE CUDA solution
+# advances Nexus AND the child (merged mining): the child process prepares
+# candidates and hands them to its parent over the authenticated hierarchy
+# link, and the parent's mining template carries them.
 #
-# The CUDA worker (lattice-miner-gpu) does PoW only; it cannot reach the network on
-# its own. So this image bundles a Lattice node and the mining coordinator:
+# The child joins PERMISSIONLESSLY: a topology entry with no genesis seed boots
+# the child process in `awaitingGenesis`, and it re-derives the genesis through
+# its authenticated parent link (never from "a node that tracks it"). Child
+# peers for catch-up sync come from the parent rendezvous (getChildPeers).
 #
-#   1. lattice-node joins via bootstrap seeds, then syncs the chain source-agnostically
-#      (any peer, PoW + content-addressed), exposing RPC on localhost.
-#   2. lattice-mining-coordinator pulls templates from that local node and drives the
-#      CUDA worker for the actual proof-of-work, then gossips sealed blocks back.
+# libcuda is injected from the host driver by the NVIDIA container runtime
+# (vast.ai / RunPod / Lambda --gpus all); NVRTC compiles the kernel at run time.
 #
-# Bootstrap seeds are built into the node binary (BootstrapPeers), and the default
-# --min-peer-key-bits (16) already matches the live network, so a bare node joins and
-# syncs source-agnostically on its own — no --peer or key-bits flag to configure.
-# (Verified: a fresh bare node reaches the mainnet's mineable tip in ~2 min.)
-#
-# libcuda is injected from the host driver by the NVIDIA container runtime (vast.ai /
-# RunPod / Lambda --gpus all); NVRTC compiles the kernel at run time.
-#
-# MERGED (MULTI-CHAIN) MINING — set CHILD_CHAINS to also advance child chain(s) of
-# Nexus on THIS box. Child chains run as SEPARATE PROCESSES that subscribe to the local
-# Nexus node for blocks, exactly as documented in deploy/README.md ("Per-process child
-# chains") and exercised by the SmokeTests (lib/lattice.mjs spawnChild,
-# scenarios/persistence/restart-with-children.mjs). For each child this entrypoint runs
-# the documented runbook — deploy -> genesis-hex -> spawn -> register-rpc — then the
-# coordinator merge-mines Nexus + each child in one PoW search (a solution advances
-# whatever chain's difficulty it clears; the easiest target is always cleared). Sealed
-# child blocks anchor to Nexus via ChildBlockProof.
-#   * The deploy response (genesis-hex + the child's parent-side P2P address) is saved
-#     under the child's data dir, so an in-place restart RE-SPAWNS each child from the
-#     same genesis against its persisted data (heights/balances preserved) — matching
-#     the restart-with-children smoke, no re-deploy.
-#   * SINGLE-BOX ONLY: a first deploy builds a FRESH genesis (timestamped now()), so
-#     this is ONE box running its own child — NOT a way for many boxes to share one
-#     child (a fresh box would deploy a divergent genesis).
-#   * Best-effort: if a child can't be established it is SKIPPED and the box keeps
-#     mining the rest (down to Nexus-only). A child never blocks Nexus mining.
-#
-# Tunables (env):
-#   DATA_DIR          node data dir                         (default /data)
-#   RPC_PORT          local Nexus node RPC port             (default 8080)
-#   MINER_WORKERS     concurrent worker invocations         (default 1)
-#   MINER_BACKEND     cuda | opencl | cpu                   (default cuda)
-#   MINER_BATCH_SIZE  nonces per GPU dispatch (default 2e9; large = efficient on GPU)
-#   EXTRA_NODE_ARGS   extra lattice-node flags (e.g. --coinbase-address <addr>)
-#   EXTRA_MINER_ARGS  extra coordinator flags
-#   CHILD_CHAINS      space/comma-separated child directory name(s) to DEPLOY (fresh
-#                     genesis) under Nexus and merge-mine. SINGLE-BOX only. Empty = default.
-#   CHILD_FOLLOW      space/comma-separated full chain path(s) of EXISTING anchored children
-#                     to FOLLOW + merge-mine (e.g. "Nexus/toy"). The node resolves genesis +
-#                     peers itself and the coordinator auto-includes them (no --child-node).
-#                     This is how MANY boxes share ONE child; use instead of CHILD_CHAINS.
-#   CHILD_COINBASE    payout address to credit in each entrypoint-spawned child's coinbase
-#                     (CHILD_CHAINS / CHILD_GENESIS_HEX). Without it the child mines
-#                     empty-reward templates and forfeits its block reward. (CHILD_FOLLOW
-#                     children inherit the node's --coinbase-address automatically.)
-#   CHILD_EXTERNAL_HOST public host a spawned child advertises for chain-gossip (cloud/NAT);
-#                     expose the child p2p port too. Unset = loopback (local only).
-#   CHILD_BOOT_TIMEOUT  seconds to wait for a child to become mineable before skipping
-#                       it and mining without it                       (default 180)
-#   CHILD_* deploy params (applied to every child in CHILD_CHAINS):
-#     CHILD_TARGET_BLOCK_TIME (1000)  CHILD_INITIAL_REWARD (1024)
-#     CHILD_HALVING_INTERVAL (210000) CHILD_RETARGET_WINDOW (120)
-#     CHILD_PREMINE (0)               CHILD_MAX_TX (100)
-#     CHILD_MAX_STATE_GROWTH (100000) CHILD_MAX_BLOCK_SIZE (1000000)
-set -euo pipefail
+# Config (env):
+#   NEXUS_PEERS   space-separated publicKey@host:port overlay peers
+#                 (default: the mainnet backbones + the testnet follower)
+#   CHILD_PATH    absolute child path to adopt (default Nexus/testnet);
+#                 set empty to mine Nexus only
+#   WORKERS       GPU worker processes (default 1; one drives the whole GPU)
+#   BATCH_SIZE    nonce span per worker per iteration (default 2_000_000_000)
+#   REWARD_BATCH  pre-signed `lattice-rewards emit-batch` file; mining waits
+#                 for it to exist (default /data/reward-batch.jsonl) — ship it
+#                 with scp after boot. The reward KEY never touches this host.
+#   MINER_BACKEND cuda|opencl|cpu for the worker shim (default cuda)
+set -eu
 
-DATA_DIR="${DATA_DIR:-/data}"
-RPC_PORT="${RPC_PORT:-8080}"
-NODE_API="http://127.0.0.1:${RPC_PORT}/api"
-mkdir -p "$DATA_DIR"
+ROOT="${DATA_DIR:-/data}"
+CHILD_PATH="${CHILD_PATH-Nexus/testnet}"
+NEXUS_PEERS="${NEXUS_PEERS:-139b8f3639e7c515417c63bd3a652a5c6fd4a1a2d0baed8e33ea63047995fe64@lattice-mainnet-iad.fly.dev:4001 35edf67bfe3d612aeb1f0e25da9d3f0ced44dbf79d34f00c548cf9005be6eb7d@lattice-mainnet-ams.fly.dev:4001 9cace839489acb30385a9f20025cb9d6365283c81dce14cadab26507065acd4e@lattice-mainnet-sjc.fly.dev:4001 57f80deb3b00da1b14b630638a4d0307be98126ec1d550476e4889087bb22d0f@lattice-mainnet-testnet.fly.dev:4001}"
+WORKERS="${WORKERS:-1}"
+BATCH_SIZE="${BATCH_SIZE:-2000000000}"
+REWARD_BATCH="${REWARD_BATCH:-$ROOT/reward-batch.jsonl}"
+NEXUS_RPC="http://127.0.0.1:8080"
 
-# Normalize CHILD_CHAINS (allow comma or whitespace separators) into an array.
-CHILD_CHAINS="${CHILD_CHAINS:-}"
-read -r -a CHILDREN <<< "${CHILD_CHAINS//,/ }"
-CHILD_BOOT_TIMEOUT="${CHILD_BOOT_TIMEOUT:-180}"
+mkdir -p "$ROOT"
 
-# CHILD_FOLLOW: full chain path(s) of EXISTING, anchored children to FOLLOW (not deploy),
-# e.g. "Nexus/toy". The node runs with --supervise-children and resolves each child's
-# genesis (from its synced parent GenesisState) + peers (child-peer rendezvous) ON ITS OWN;
-# the coordinator then auto-mines them (node folds served children into the merged template
-# — no --child-node). This is how MANY boxes share ONE anchored child, unlike CHILD_CHAINS
-# (which deploys a fresh, single-box genesis).
-CHILD_FOLLOW="${CHILD_FOLLOW:-}"
-read -r -a FOLLOWS <<< "${CHILD_FOLLOW//,/ }"
+peers_json=""
+for peer in $NEXUS_PEERS; do
+    peers_json="$peers_json\"$peer\","
+done
+peers_json="${peers_json%,}"
 
-# Child deploy defaults (mirror SmokeTests spawnChild), overridable via env.
-CHILD_TARGET_BLOCK_TIME="${CHILD_TARGET_BLOCK_TIME:-1000}"
-CHILD_INITIAL_REWARD="${CHILD_INITIAL_REWARD:-1024}"
-CHILD_HALVING_INTERVAL="${CHILD_HALVING_INTERVAL:-210000}"
-CHILD_RETARGET_WINDOW="${CHILD_RETARGET_WINDOW:-120}"
-CHILD_PREMINE="${CHILD_PREMINE:-0}"
-CHILD_MAX_TX="${CHILD_MAX_TX:-100}"
-CHILD_MAX_STATE_GROWTH="${CHILD_MAX_STATE_GROWTH:-100000}"
-CHILD_MAX_BLOCK_SIZE="${CHILD_MAX_BLOCK_SIZE:-1000000}"
-
-if [ "${#CHILDREN[@]}" -gt 0 ] && [ -n "${SKYPILOT_TASK_ID:-}" ]; then
-  echo "[gpu-miner] WARNING: CHILD_CHAINS is set on a managed SkyPilot job (SKYPILOT_TASK_ID present)." >&2
-  echo "[gpu-miner]          Merged mining is SINGLE-BOX ONLY — a fresh recovery box re-forks a new child genesis." >&2
+child_json=""
+if [ -n "$CHILD_PATH" ]; then
+    child_json=",
+    \"$CHILD_PATH\": {
+      \"listen\": 4101,
+      \"fact\": 4102,
+      \"rpc\": 8180
+    }"
 fi
 
-CHILD_PIDS=()
-
-# authed helpers ------------------------------------------------------------------
-rpc_get()  { curl -fsS "${NODE_API}$1" -H "Authorization: Bearer $(cat "${DATA_DIR}/.cookie")" 2>/dev/null; }
-rpc_post() { curl -sS -o "$2" -w '%{http_code}' -X POST "${NODE_API}$1" \
-               -H "Authorization: Bearer $(cat "${DATA_DIR}/.cookie")" \
-               -H 'content-type: application/json' -d "$3" 2>/dev/null; }
-
-# Block until a chain is MINEABLE (POST /chain/template==200 with its own cookie, 503
-# while syncing). $4=timeout secs; 0 (parent) waits indefinitely, only bailing if the
-# parent process dies; >0 (child) returns 1 after the timeout so the caller degrades to
-# fewer chains instead of hanging forever.
-wait_mineable() {  # $1=rpc_port  $2=cookie_file  $3=label  $4=timeout_secs
-  local port=$1 cookie=$2 label=$3 timeout=${4:-0}
-  local api="http://127.0.0.1:${port}/api"
-  local waited=0
-  echo "[gpu-miner] waiting for '${label}' to be mineable (chain/template 200 on :${port}$([ "$timeout" -gt 0 ] && echo ", timeout ${timeout}s"))…"
-  until [ -s "$cookie" ] && \
-        curl -fsS -o /dev/null -X POST "${api}/chain/template" \
-          -H "Authorization: Bearer $(cat "$cookie" 2>/dev/null)" \
-          -H 'content-type: application/json' -d '{}' 2>/dev/null; do
-    kill -0 "$NODE_PID" 2>/dev/null || { echo "[gpu-miner] Nexus node exited before '${label}' became mineable" >&2; exit 1; }
-    if [ "$timeout" -gt 0 ] && [ "$waited" -ge "$timeout" ]; then
-      echo "[gpu-miner] '${label}' not mineable after ${timeout}s" >&2
-      return 1
-    fi
-    sleep 5
-    waited=$(( waited + 5 ))
-  done
-  return 0
+# Declarative topology, rewritten every boot; identities and chain state
+# persist under $ROOT. The child entry has no genesis seed on purpose (adopt).
+cat > "$ROOT/lattice.json" <<EOF
+{
+  "chains": {
+    "Nexus": {
+      "listen": 4001,
+      "fact": 4002,
+      "rpc": 8080,
+      "peers": [$peers_json]
+    }$child_json
+  }
 }
+EOF
 
-# Establish one per-process child end-to-end, mirroring deploy/README.md + spawnChild:
-#   1. deploy (first boot) OR load the saved deploy info (restart) for its genesis-hex
-#      and parent-side P2P address;
-#   2. spawn the child as its own lattice-node subscribed to the local Nexus P2P;
-#   3. wait until it is mineable and verify identity;
-#   4. register its RPC with Nexus and append the coordinator's --child-node flags.
-# Best-effort: any failure logs a warning, returns 1, and the child is skipped.
-ensure_child() {  # $1=dir  $2=index  (uses globals: NEXUS_DIR, PARENT_P2P)
-  local dir=$1 idx=$2
-  local childDir="${DATA_DIR}/children/${dir}"
-  local deployFile="${childDir}/deploy.json"
-  local crpc=$(( RPC_PORT + 10 + idx ))
-  local cp2p=$(( ${PARENT_P2P##*:} + 100 + idx ))   # avoid the parent's own P2P port
-  local ghex chainP2P code
-  mkdir -p "$childDir"
-
-  echo "[gpu-miner] establishing child chain '${dir}' (rpc :${crpc}, p2p :${cp2p})…"
-  # Obtain the child's genesis-hex (+ its parent-side P2P address), saved to deploy.json:
-  #   - restart with persisted /data  -> reuse the saved deploy.json (re-spawn, no deploy);
-  #   - fresh                         -> POST /chain/deploy;
-  #   - already deployed (e.g. 409, or deploy.json lost but parent still tracks it)
-  #                                    -> GET /chain/genesis to reuse the existing genesis.
-  if [ -s "$deployFile" ]; then
-    echo "[gpu-miner]   reusing saved deploy for '${dir}' (restart) — re-spawning from persisted genesis"
-  elif [ -n "${CHILD_GENESIS_HEX:-}" ]; then
-    # JOIN an existing ANCHORED child from its genesis-hex, spawned as a proper CHILD of the
-    # local Nexus (its own identity, --subscribe-p2p the local parent). This is the correct
-    # topology — a standalone toy-only node reuses one identity for parent-sub + chain-gossip
-    # and FLAPS (duplicate-identity eviction). Same-chain peers are then found via the parent
-    # getChildPeers rendezvous. Single-child; unset = deploy fresh.
-    echo "[gpu-miner]   JOINING anchored child '${dir}' from CHILD_GENESIS_HEX (proper child of local Nexus)"
-    printf '{"genesisHex":"%s"}' "$CHILD_GENESIS_HEX" > "$deployFile"
-  else
-    local body
-    body=$(printf '{"directory":"%s","parentDirectory":"%s","chainPath":["%s","%s"],"targetBlockTime":%s,"initialReward":%s,"halvingInterval":%s,"premine":%s,"maxTransactionsPerBlock":%s,"maxStateGrowth":%s,"maxBlockSize":%s,"retargetWindow":%s,"wasmPolicies":[],"startMining":false}' \
-      "$dir" "$NEXUS_DIR" "$NEXUS_DIR" "$dir" "$CHILD_TARGET_BLOCK_TIME" "$CHILD_INITIAL_REWARD" \
-      "$CHILD_HALVING_INTERVAL" "$CHILD_PREMINE" "$CHILD_MAX_TX" "$CHILD_MAX_STATE_GROWTH" \
-      "$CHILD_MAX_BLOCK_SIZE" "$CHILD_RETARGET_WINDOW")
-    code=$(rpc_post "/chain/deploy" /tmp/deploy.out "$body") || code=000
-    if [ "$code" = "200" ]; then
-      cp /tmp/deploy.out "$deployFile"
-    elif rpc_get "/chain/genesis?chainPath=${NEXUS_DIR}/${dir}" > /tmp/gen.out 2>/dev/null \
-         && [ -n "$(jq -r '.genesisHex // empty' /tmp/gen.out 2>/dev/null)" ]; then
-      echo "[gpu-miner]   child '${dir}' already deployed — reusing existing genesis"
-      cp /tmp/gen.out "$deployFile"
-    else
-      echo "[gpu-miner] WARNING: could not deploy or fetch genesis for child '${dir}' (deploy HTTP ${code}): $(head -c 160 /tmp/deploy.out 2>/dev/null) — mining without it" >&2
-      return 1
-    fi
-  fi
-  ghex=$(jq -r '.genesisHex' "$deployFile")
-  chainP2P=$(jq -r '.chainP2PAddress // empty' "$deployFile")
-  if [ -z "$ghex" ] || [ "$ghex" = "null" ]; then
-    echo "[gpu-miner] WARNING: no genesis-hex for child '${dir}' — skipping it" >&2
-    return 1
-  fi
-
-  # Spawn the child as its own process, subscribed to the local Nexus P2P (per the
-  # runbook: boots from embedded genesis, extracts blocks from the parent). --no-dns-seeds
-  # because a child never joins mainnet gossip; it gets everything from the parent.
-  # shellcheck disable=SC2086
-  lattice-node \
-    --genesis-hex "$ghex" \
-    --chain-directory "$dir" \
-    --chain-path "${NEXUS_DIR}/${dir}" \
-    --subscribe-p2p "$PARENT_P2P" \
-    --port "$cp2p" --rpc-port "$crpc" --data-dir "$childDir" \
-    ${CHILD_EXTERNAL_HOST:+--external-address "${CHILD_EXTERNAL_HOST}:${cp2p}"} \
-    ${CHILD_COINBASE:+--coinbase-address "${CHILD_COINBASE}"} \
-    ${CHILD_EXTRA_ARGS:-} \
-    --no-dns-seeds &
-  CHILD_PIDS+=( $! )
-
-  local ccookie="${childDir}/.cookie"
-  if ! wait_mineable "$crpc" "$ccookie" "${NEXUS_DIR}/${dir}" "$CHILD_BOOT_TIMEOUT"; then
-    echo "[gpu-miner] WARNING: child '${dir}' did not become mineable on :${crpc} — skipping it" >&2
-    return 1
-  fi
-  if ! curl -fsS "http://127.0.0.1:${crpc}/api/chain/info" \
-        -H "Authorization: Bearer $(cat "$ccookie")" 2>/dev/null \
-      | jq -e --arg d "$dir" '.chains[] | select(.directory==$d)' >/dev/null; then
-    echo "[gpu-miner] WARNING: child '${dir}' on :${crpc} did not report its chain — skipping it" >&2
-    return 1
-  fi
-
-  # Register the child's RPC with Nexus so chain/map can route (idempotent each boot).
-  rpc_post "/chain/register-rpc" /tmp/reg.out \
-    "$(printf '{"chainPath":["%s","%s"],"endpoint":"http://127.0.0.1:%s","authToken":"%s"}' \
-       "$NEXUS_DIR" "$dir" "$crpc" "$(cat "$ccookie")")" >/dev/null || true
-
-  echo "[gpu-miner]   child '${dir}' mineable on :${crpc}"
-  CHILD_COORD_ARGS+=(--child-node "http://127.0.0.1:${crpc}/api" --child-rpc-cookie-file "$ccookie")
-  return 0
-}
-
-echo "[gpu-miner] starting Nexus node (built-in seeds, default key-bits → source-agnostic sync)…"
-[ "${#CHILDREN[@]}" -gt 0 ] && echo "[gpu-miner] merged mining requested for child chain(s): ${CHILDREN[*]}"
-# --supervise-children lets the node spawn + sync the chains named in CHILD_FOLLOW from a
-# durable follow intent (it resolves their genesis + peers itself). Only enabled when
-# following, so a plain miner is unchanged.
-SUPERVISE_ARG=""
-[ "${#FOLLOWS[@]}" -gt 0 ] && SUPERVISE_ARG="--supervise-children"
-# shellcheck disable=SC2086
-lattice-node --autosize --data-dir "$DATA_DIR" --rpc-port "$RPC_PORT" $SUPERVISE_ARG ${EXTRA_NODE_ARGS:-} &
-NODE_PID=$!
-# On teardown, stop the coordinator's node tree. (In a container, exiting the main
-# process tears everything down anyway; this covers the pre-coordinator setup phase.)
-trap 'kill "$NODE_PID" ${CHILD_PIDS[@]+"${CHILD_PIDS[@]}"} 2>/dev/null || true' EXIT INT TERM
-
-# Nexus must be synced before it can deploy/build a child genesis or mine.
-wait_mineable "$RPC_PORT" "${DATA_DIR}/.cookie" "Nexus" 0
-
-CHILD_COORD_ARGS=()
-if [ "${#CHILDREN[@]}" -gt 0 ]; then
-  NEXUS_DIR=$(rpc_get "/chain/info" | jq -r '.nexus')
-  PARENT_P2P=$(rpc_get "/chain/info" | jq -r '.p2pAddress')
-  if [ -z "$NEXUS_DIR" ] || [ "$NEXUS_DIR" = "null" ] || [ -z "$PARENT_P2P" ] || [ "$PARENT_P2P" = "null" ]; then
-    echo "[gpu-miner] WARNING: could not read Nexus dir / P2P address — mining Nexus only" >&2
-  else
-    established=0
-    for i in "${!CHILDREN[@]}"; do
-      dir="${CHILDREN[$i]}"
-      [ -z "$dir" ] && continue
-      if ensure_child "$dir" "$i"; then established=$(( established + 1 )); fi
+# Bring-up runs beside the foreground supervisor: wait for the parent to be
+# genuinely synced (>=1 peer, height stable across polls — an idle network's
+# tip does not move, a syncing node's does), then for the reward batch, then
+# hand over to the reference mining supervisor. The child catches up in the
+# background and starts contributing candidates when ready; it never blocks
+# Nexus mining.
+(
+    echo "mining bring-up: waiting for Nexus to sync…"
+    sleep 10
+    stable=0
+    last_height=-1
+    while :; do
+        info="$(curl -fsS "$NEXUS_RPC/api/chain/info" 2>/dev/null)" || { sleep 5; continue; }
+        peers="$(curl -fsS "$NEXUS_RPC/api/peers" 2>/dev/null | jq -r '.count // 0' 2>/dev/null)"
+        height="$(echo "$info" | jq -r '.height // -1')"
+        if [ "${peers:-0}" -ge 1 ] && [ "$height" -ge 0 ] && [ "$height" = "$last_height" ]; then
+            stable=$((stable + 1))
+            [ "$stable" -ge 3 ] && break
+        else
+            stable=0
+        fi
+        last_height="$height"
+        sleep 5
     done
-    [ "$established" -eq 0 ] && echo "[gpu-miner] NOTE: no requested child chains are available — mining Nexus only" >&2
-  fi
-fi
+    echo "mining bring-up: Nexus synced at height $last_height."
 
-# Follow existing anchored children (CHILD_FOLLOW). The node resolves genesis + peers and
-# supervises the child; once it's synced + registered the coordinator auto-includes it in
-# the merged template (no --child-node here). Idempotent: re-follow each boot is harmless.
-if [ "${#FOLLOWS[@]}" -gt 0 ]; then
-  for path in "${FOLLOWS[@]}"; do
-    [ -z "$path" ] && continue
-    jarr=$(printf '%s' "$path" | jq -Rc 'split("/")')
-    echo "[gpu-miner] following existing child chain '${path}' (node resolves genesis + peers via rendezvous)…"
-    code=$(rpc_post "/chain/follow" /tmp/follow.out "$(printf '{"chainPath":%s}' "$jarr")") || code=000
-    if [ "$code" = "200" ]; then
-      echo "[gpu-miner]   follow '${path}' accepted — auto-mined once synced + registered"
-    else
-      echo "[gpu-miner] WARNING: follow '${path}' failed (HTTP ${code}): $(head -c 160 /tmp/follow.out 2>/dev/null) — mining without it" >&2
-    fi
-  done
+    while [ ! -s "$REWARD_BATCH" ]; do
+        echo "mining bring-up: waiting for reward batch at $REWARD_BATCH (scp it in)…"
+        sleep 15
+    done
+    echo "mining bring-up: starting the mining supervisor."
+    NODE_URL="$NEXUS_RPC" \
+    COORDINATOR=/usr/local/bin/lattice-mining-coordinator \
+    WORKER=/usr/local/bin/lattice-cuda-worker \
+    WORKERS="$WORKERS" \
+    BATCH_SIZE="$BATCH_SIZE" \
+    REWARD_BATCH="$REWARD_BATCH" \
+    CURSOR_FILE="$ROOT/reward-cursor" \
+    LOG_FILE="$ROOT/mining.log" \
+    exec python3 /usr/local/bin/mine-supervisor.py
+) &
 
-  # MINE AFTER SYNCING. follow is ASYNC — the reconciler resolves each child's genesis (via
-  # the rendezvous) + syncs + registers it over the next minutes. The coordinator snapshots
-  # its mineable chains at STARTUP, so if we start it now it never picks the child up. Wait
-  # until every followed child is folded into the node's merged template (childBlocks) before
-  # starting the coordinator. Best-effort: after the timeout, start anyway with whatever synced.
-  want=(); for p in "${FOLLOWS[@]}"; do [ -n "$p" ] && want+=("${p##*/}"); done
-  ftimeout="${CHILD_FOLLOW_TIMEOUT:-900}"; fwaited=0
-  echo "[gpu-miner] waiting for followed child(ren) [${want[*]}] to sync into the merged template before mining (timeout ${ftimeout}s)…"
-  until [ "$fwaited" -ge "$ftimeout" ]; do
-    rpc_post "/chain/template" /tmp/tmpl.out '{}' >/dev/null 2>&1
-    cb=$(jq -r 'try (.childBlocks | keys[]) catch empty' /tmp/tmpl.out 2>/dev/null)
-    missing=false
-    for d in "${want[@]}"; do printf '%s\n' "$cb" | grep -qxF "$d" || missing=true; done
-    if ! $missing; then echo "[gpu-miner]   followed child(ren) present in merged template — starting miner"; break; fi
-    sleep 10; fwaited=$(( fwaited + 10 ))
-  done
-  [ "$fwaited" -ge "$ftimeout" ] && echo "[gpu-miner] WARNING: not all followed children synced after ${ftimeout}s — mining what is available" >&2
-fi
-
-# GPU batch size: the coordinator default (10k nonces/batch) is tuned for CPU workers.
-# A GPU worker is spawned per batch, so a tiny batch means the run is dominated by
-# CUDA init/teardown instead of hashing (GPU reads ~idle). Use a large dispatch so each
-# kernel launch does real work — matches the docs and the Mac/vast configs.
-MINER_BATCH_SIZE="${MINER_BATCH_SIZE:-2000000000}"
-
-nchild=$(( ${#CHILD_COORD_ARGS[@]} / 2 ))
-# Serve-only: a sync/serve node (e.g. a CPU seed that cannot and must not mine) runs the
-# Nexus node + child chains but NO mining coordinator. Stay alive on the node process; the
-# already-spawned children keep syncing and serving. Select with MINER_BACKEND=none.
-if [ "${MINER_BACKEND:-cuda}" = "none" ]; then
-  echo "[gpu-miner] SERVE-ONLY (MINER_BACKEND=none): Nexus node + ${nchild} child chain(s) sync/serve, no mining coordinator"
-  wait "$NODE_PID"
-  exit $?
-fi
-echo "[gpu-miner] starting coordinator (${MINER_BACKEND:-cuda}, ${MINER_WORKERS:-1} worker(s), batch ${MINER_BATCH_SIZE}$([ "$nchild" -gt 0 ] && echo ", +${nchild} child chain(s)"))"
-# The coordinator has no --backend flag and never passes one to the worker, so the GPU
-# backend is forced by the cuda-worker shim (which reads MINER_BACKEND from the env).
-# Coinbase = the node's identity (a fresh non-premine key unless EXTRA_NODE_ARGS sets
-# --coinbase-address). stdbuf -oL keeps coordinator output line-buffered so container
-# logs show mining progress live instead of block-buffering it.
-# shellcheck disable=SC2086
-exec stdbuf -oL -eL lattice-mining-coordinator \
-  --node "$NODE_API" \
-  --rpc-cookie-file "${DATA_DIR}/.cookie" \
-  --worker-executable /usr/local/bin/lattice-cuda-worker \
-  --workers "${MINER_WORKERS:-1}" \
-  --batch-size "$MINER_BATCH_SIZE" \
-  ${CHILD_COORD_ARGS[@]+"${CHILD_COORD_ARGS[@]}"} \
-  ${EXTRA_MINER_ARGS:-}
-
-# rebuild: pick up lattice-node:main #17 (proof self-heal on reconnect)
+exec lattice up --root "$ROOT" --foreground
