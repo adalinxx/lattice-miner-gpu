@@ -69,31 +69,34 @@ cat > "$ROOT/lattice.json" <<EOF
 }
 EOF
 
-# Bring-up runs beside the foreground supervisor: wait for the parent to be
-# genuinely synced (>=1 peer, height stable across polls — an idle network's
-# tip does not move, a syncing node's does), then for the reward batch, then
-# hand over to the reference mining supervisor. The child catches up in the
+# Bring-up runs beside the foreground supervisor: wait for the parent to
+# catch up to the network, then for the reward batch, then hand over to the
+# reference mining supervisor. The child catches up in the
 # background and starts contributing candidates when ready; it never blocks
 # Nexus mining.
 (
-    echo "mining bring-up: waiting for Nexus to sync…"
+    # Synced means CAUGHT UP TO THE NETWORK, not locally stable: a just-booted
+    # node sits at height 0 with connected peers for longer than any local
+    # stability window while cold sync spins up, and mining then extends a
+    # private fork from genesis. Gate on the height a public reference node
+    # reports (any backbone; tried in order) — never on local quiescence.
+    echo "mining bring-up: waiting for Nexus to catch up to the network…"
     sleep 10
-    stable=0
-    last_height=-1
     while :; do
-        info="$(curl -fsS "$NEXUS_RPC/api/chain/info" 2>/dev/null)" || { sleep 5; continue; }
+        network_height=""
+        for ref in ${REFERENCE_RPCS:-https://lattice-mainnet-iad.fly.dev https://lattice-mainnet-ams.fly.dev https://lattice-mainnet-sjc.fly.dev}; do
+            network_height="$(curl -fsS --max-time 8 "$ref/api/chain/info" 2>/dev/null | jq -r '.height // empty')" && [ -n "$network_height" ] && break
+        done
+        [ -n "$network_height" ] || { sleep 10; continue; }
+        height="$(curl -fsS "$NEXUS_RPC/api/chain/info" 2>/dev/null | jq -r '.height // -1')"
         peers="$(curl -fsS "$NEXUS_RPC/api/peers" 2>/dev/null | jq -r '.count // 0' 2>/dev/null)"
-        height="$(echo "$info" | jq -r '.height // -1')"
-        if [ "${peers:-0}" -ge 1 ] && [ "$height" -ge 0 ] && [ "$height" = "$last_height" ]; then
-            stable=$((stable + 1))
-            [ "$stable" -ge 3 ] && break
-        else
-            stable=0
+        if [ "${peers:-0}" -ge 1 ] && [ "${height:--1}" -ge "$network_height" ]; then
+            break
         fi
-        last_height="$height"
-        sleep 5
+        echo "mining bring-up: local $height / network $network_height…"
+        sleep 10
     done
-    echo "mining bring-up: Nexus synced at height $last_height."
+    echo "mining bring-up: Nexus caught up (height $height, network $network_height)."
 
     while [ ! -s "$REWARD_BATCH" ]; do
         echo "mining bring-up: waiting for reward batch at $REWARD_BATCH (scp it in)…"
