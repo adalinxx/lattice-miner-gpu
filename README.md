@@ -76,29 +76,27 @@ Point the coordinator at this binary:
 
 ```bash
 lattice-mining-coordinator \
-  --node http://127.0.0.1:8080/api --rpc-cookie-file ~/.lattice/.cookie \
+  --node http://127.0.0.1:8080 --recipient Nexus=<addr> \
   --worker-executable ./target/release/lattice-miner-gpu --workers 1
 ```
 
 ## Docker (cloud GPU rental)
 
 A self-contained CUDA image (`ghcr.io/adalinxx/lattice-miner-gpu:main`, built by CI)
-bundles a Lattice node + the mining coordinator + this worker. The node syncs the
-backbone via DNS seeds and the coordinator drives the GPU — no peer or wiring to
-configure:
+bundles a Lattice node + the mining coordinator + this worker. One node process hosts
+Nexus and the configured child levels; once Nexus catches up to the network, the
+reference mine-supervisor drives the GPU:
 
 ```bash
-docker run --gpus all -v lattice-data:/data ghcr.io/adalinxx/lattice-miner-gpu:main
+docker run --gpus all -v lattice-data:/data \
+  -e RECIPIENTS=Nexus=<addr>,Nexus/testnet=<addr> \
+  ghcr.io/adalinxx/lattice-miner-gpu:main
 ```
 
 `libcuda` is provided by the host driver through the NVIDIA container runtime
-(`--gpus all`). Tunables via `-e`: `MINER_WORKERS`, `MINER_BACKEND` (cuda|opencl|cpu),
-`EXTRA_NODE_ARGS` (e.g. `--coinbase-address <addr>`), `EXTRA_MINER_ARGS`. See
-`deploy/gpu-entrypoint.sh`.
-
-**Merged (multi-chain) mining.** Set `-e CHILD_CHAINS="toy"` to also deploy and
-merge-mine a child chain of Nexus on this box — one PoW search advances both (easiest
-target wins; sealed blocks anchor the child). This is **single-box only**: each deploy
-builds a fresh genesis, so it's for one box mining its own child, not many boxes sharing
-one child. Child deploy params are overridable (`CHILD_TARGET_BLOCK_TIME`,
-`CHILD_INITIAL_REWARD`, …); see `deploy/gpu-entrypoint.sh`.
+(`--gpus all`). Each block names its own reward recipient: `RECIPIENTS` (required)
+maps `<chain path>=<address>`; a hosted chain without an entry burns its reward and
+fees. No key or pre-signed reward file lives on the box. Other tunables via `-e`:
+`HOSTED_CHAINS` (merge-mined child paths, parent first; default `Nexus/testnet`, empty
+= Nexus only), `NEXUS_PEERS`, `WORKERS`, `BATCH_SIZE`, `MINER_BACKEND`
+(cuda|opencl|cpu). See `deploy/gpu-entrypoint.sh`.
