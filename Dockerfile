@@ -46,7 +46,7 @@ COPY --from=node /usr/local/bin/lattice                 /usr/local/bin/lattice
 COPY --from=node /usr/local/bin/lattice-mining-coordinator /usr/local/bin/lattice-mining-coordinator
 # The reference mining supervisor (one coordinator round at a time; each block
 # names its reward recipient from RECIPIENTS), pinned to the same node release.
-ADD https://raw.githubusercontent.com/adalinxx/lattice-node/fafdb334/deploy/mine-supervisor.py /usr/local/bin/mine-supervisor.py
+ADD https://raw.githubusercontent.com/adalinxx/lattice-node/b36174da/deploy/mine-supervisor.py /usr/local/bin/mine-supervisor.py
 RUN chmod +x /usr/local/bin/mine-supervisor.py
 COPY --from=worker /src/target/release/lattice-miner-gpu /usr/local/bin/lattice-miner-gpu
 # Backend shim: the coordinator can't pass --backend to the worker, so force it here.
