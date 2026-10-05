@@ -34,6 +34,11 @@ NEXUS_PEERS="${NEXUS_PEERS:-139b8f3639e7c515417c63bd3a652a5c6fd4a1a2d0baed8e33ea
 WORKERS="${WORKERS:-1}"
 BATCH_SIZE="${BATCH_SIZE:-2000000000}"
 NEXUS_RPC="http://127.0.0.1:8080"
+# The node's loopback operator port requires the cookie it writes at every
+# start (`lattice up --root $ROOT` gives it $ROOT/chains/Nexus); re-read on
+# every use, since a node restart rotates it.
+COOKIE_FILE="$ROOT/chains/Nexus/.cookie"
+rpc() { curl -fsS --user "$(cat "$COOKIE_FILE" 2>/dev/null)" "$NEXUS_RPC$1"; }
 
 mkdir -p "$ROOT"
 
@@ -77,8 +82,8 @@ EOF
             network_height="$(curl -fsS --max-time 8 "$ref/api/chain/info" 2>/dev/null | jq -r '.height // empty')" && [ -n "$network_height" ] && break
         done
         [ -n "$network_height" ] || { sleep 10; continue; }
-        height="$(curl -fsS "$NEXUS_RPC/api/chain/info" 2>/dev/null | jq -r '.height // -1')"
-        peers="$(curl -fsS "$NEXUS_RPC/api/peers" 2>/dev/null | jq -r '.count // 0' 2>/dev/null)"
+        height="$(rpc /api/chain/info 2>/dev/null | jq -r '.height // -1')"
+        peers="$(rpc /api/peers 2>/dev/null | jq -r '.count // 0' 2>/dev/null)"
         if [ "${peers:-0}" -ge 1 ] && [ "${height:--1}" -ge "$network_height" ]; then
             break
         fi
@@ -89,6 +94,7 @@ EOF
 
     echo "mining bring-up: starting the mining supervisor."
     NODE_URL="$NEXUS_RPC" \
+    COOKIE_FILE="$COOKIE_FILE" \
     COORDINATOR=/usr/local/bin/lattice-mining-coordinator \
     WORKER=/usr/local/bin/lattice-cuda-worker \
     WORKERS="$WORKERS" \
