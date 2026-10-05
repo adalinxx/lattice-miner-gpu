@@ -76,7 +76,8 @@ Point the coordinator at this binary:
 
 ```bash
 lattice-mining-coordinator \
-  --node http://127.0.0.1:8080 --recipient Nexus=<addr> \
+  --node http://127.0.0.1:8080 --rpc-cookie-file <root>/chains/Nexus/.cookie \
+  --recipient Nexus=<addr> \
   --worker-executable ./target/release/lattice-miner-gpu --workers 1
 ```
 
