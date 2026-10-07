@@ -16,7 +16,7 @@ COPY . .
 RUN cargo build --release --features cuda
 
 # ── The Lattice node + coordinator (already built, static-swift-stdlib) ───────
-FROM ghcr.io/adalinxx/lattice-node:sha-d4b1aa9@sha256:44c96d685765d6a4c2b844220f64a589319560b6735e5d7f1bc5dbea595edb82 AS node
+FROM ghcr.io/adalinxx/lattice-node:sha-60eeb10@sha256:6fd7b3db53cd04a77fe26725b20d63fa7c26e905a4bc37a6e25295b7d4a11edb AS node
 
 # ── Stage 2: the self-contained GPU miner ─────────────────────────────────────
 # RUNTIME base (not devel): the only CUDA piece needed at run time is libnvrtc (cudarc
@@ -46,7 +46,7 @@ COPY --from=node /usr/local/bin/lattice                 /usr/local/bin/lattice
 COPY --from=node /usr/local/bin/lattice-mining-coordinator /usr/local/bin/lattice-mining-coordinator
 # The reference mining supervisor (one coordinator round at a time; each block
 # names its reward recipient from RECIPIENTS), pinned to the same node release.
-ADD https://raw.githubusercontent.com/adalinxx/lattice-node/d4b1aa9b7/deploy/mine-supervisor.py /usr/local/bin/mine-supervisor.py
+ADD https://raw.githubusercontent.com/adalinxx/lattice-node/60eeb1044/deploy/mine-supervisor.py /usr/local/bin/mine-supervisor.py
 RUN chmod +x /usr/local/bin/mine-supervisor.py
 COPY --from=worker /src/target/release/lattice-miner-gpu /usr/local/bin/lattice-miner-gpu
 # Backend shim: the coordinator can't pass --backend to the worker, so force it here.
